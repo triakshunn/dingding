@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""`ia` — email & calendar commands (container side). Same commands as before; everything goes through the
+privacy broker on the laptop, which filters what you can read. You cannot send email.
+
+  ia accounts | ia new [--peek] [--max 40] | ia search "<gmail query>" [--account A] [--max 5]
+  ia read <account> <message_id>
+  ia suggest-event --title T --start ISO [--end ISO | --all-day] [--location L] [--source account:id]
+  ia suggest-reply --source account:id [--why "..."]
+  ia pending | ia dismiss N… | ia cal-add N… | ia cal-add-new --title … --start … | ia cal-list [--days 7]
+  ia draft N --body "<text>"
+  ia recent [--bucket skip|headsup|event|action|reply|private]     emails shown in recent checks/briefs
+  ia archive <ref|N>… [--bucket B [--batch 1]] [--confirmed] [--keep-unread]   (Inbox label only; undoable)
+  ia unarchive [batch_id]                                                  undo the last archive
+  ia cleanup --area promotions|social|updates|forums|spam … [--older-than DAYS] [--action trash|archive]
+             [--account A …]        → preview + plan id (nothing changes yet)
+  ia cleanup --confirm <plan_id>    → carry out exactly that preview (after the user's yes)
+  ia mail-log                        recent archive/cleanup batches  ·  ia undo-mail [batch_id]  undo one
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from brokerclient import call, out  # noqa: E402
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ia")
+    sp = ap.add_subparsers(dest="cmd", required=True)
+    sp.add_parser("accounts")
+    p = sp.add_parser("new"); p.add_argument("--peek", action="store_true"); p.add_argument("--max", type=int, default=40)
+    p = sp.add_parser("search"); p.add_argument("query"); p.add_argument("--account"); p.add_argument("--max", type=int, default=5)
+    p = sp.add_parser("read"); p.add_argument("account"); p.add_argument("id")
+    for name in ("suggest-event", "cal-add-new"):
+        p = sp.add_parser(name)
+        p.add_argument("--title", required=True); p.add_argument("--start", required=True)
+        p.add_argument("--end"); p.add_argument("--all-day", action="store_true"); p.add_argument("--location")
+        if name == "suggest-event":
+            p.add_argument("--source")
+    p = sp.add_parser("suggest-reply"); p.add_argument("--source", required=True); p.add_argument("--why", default="")
+    sp.add_parser("pending")
+    p = sp.add_parser("dismiss"); p.add_argument("n", nargs="+", type=int)
+    p = sp.add_parser("cal-add"); p.add_argument("n", nargs="+", type=int)
+    p = sp.add_parser("cal-list"); p.add_argument("--days", type=int, default=7)
+    p = sp.add_parser("draft"); p.add_argument("n", type=int); p.add_argument("--body", required=True)
+    p = sp.add_parser("recent"); p.add_argument("--bucket")
+    p = sp.add_parser("archive"); p.add_argument("targets", nargs="*")
+    p.add_argument("--bucket"); p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--confirmed", action="store_true"); p.add_argument("--keep-unread", action="store_true")
+    p = sp.add_parser("unarchive"); p.add_argument("batch_id", nargs="?")
+    p = sp.add_parser("undo-mail"); p.add_argument("batch_id", nargs="?")
+    p = sp.add_parser("cleanup"); p.add_argument("--area", action="append", default=[])
+    p.add_argument("--older-than", type=int, default=0); p.add_argument("--action", default="trash")
+    p.add_argument("--account", action="append", default=[]); p.add_argument("--confirm")
+    sp.add_parser("mail-log")
+    a = ap.parse_args()
+
+    ev = lambda: dict(title=a.title, start=a.start, end=a.end, all_day=a.all_day, location=a.location)  # noqa: E731
+    if a.cmd == "accounts":
+        out(call("accounts"))
+    elif a.cmd == "new":
+        out(call("mail.new", peek=a.peek, max=a.max))
+    elif a.cmd == "search":
+        out(call("mail.search", query=a.query, account=a.account, max=a.max))
+    elif a.cmd == "read":
+        out(call("mail.read", account=a.account, id=a.id))
+    elif a.cmd == "suggest-event":
+        out(call("suggest-event", source=a.source, **ev()))
+    elif a.cmd == "cal-add-new":
+        out(call("cal.add-new", **ev()))
+    elif a.cmd == "suggest-reply":
+        out(call("suggest-reply", source=a.source, why=a.why))
+    elif a.cmd == "pending":
+        out(call("pending"))
+    elif a.cmd == "dismiss":
+        out(call("dismiss", n=a.n))
+    elif a.cmd == "cal-add":
+        out(call("cal.add", n=a.n))
+    elif a.cmd == "cal-list":
+        out(call("cal.list", days=a.days))
+    elif a.cmd == "draft":
+        out(call("draft", n=a.n, body=a.body))
+    elif a.cmd == "recent":
+        out(call("mail.recent", bucket=a.bucket))
+    elif a.cmd == "archive":
+        if not a.targets and not a.bucket:
+            ap.error("archive: give refs/numbers or --bucket")
+        out(call("mail.archive", targets=a.targets, bucket=a.bucket, batch=a.batch,
+                 confirmed=a.confirmed, mark_read=not a.keep_unread))
+    elif a.cmd == "cleanup":
+        if a.confirm:
+            out(call("mail.cleanup", confirm=a.confirm))
+        else:
+            out(call("mail.cleanup", areas=a.area, older_than_days=a.older_than, action=a.action,
+                     accounts=a.account or None))
+    elif a.cmd == "mail-log":
+        out(call("mail.log"))
+    elif a.cmd in ("unarchive", "undo-mail"):
+        out(call("mail.unarchive", batch_id=a.batch_id))
+
+
+if __name__ == "__main__":
+    main()

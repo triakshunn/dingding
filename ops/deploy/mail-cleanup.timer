@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the mail cleanup every Sunday at 10 AM
+
+[Timer]
+OnCalendar=Sun *-*-* 10:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

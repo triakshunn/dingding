@@ -1,0 +1,3 @@
+#!/usr/bin/env python3
+import sys
+sys.exit("Sending is disabled. Drafts are saved in Gmail; the user reviews them and taps Send.")

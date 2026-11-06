@@ -1,0 +1,34 @@
+// Reduce what OpenClaw keeps about your conversations. Apply on cutover day:
+//   docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin < ~/dingding/ops/openclaw-privacy.patch.json5
+// (verified with --dry-run against OpenClaw 2026.10.6)
+{
+  agents: {
+    defaults: {
+      heartbeat: { every: "0m" },                     // no 30-min ambient agent runs
+      compaction: { memoryFlush: { enabled: false } }, // don't write memories before compacting long chats
+    },
+  },
+  memory: {
+    search: {
+      enabled: false,                                  // no memory index / recall
+      rememberAcrossConversations: false,              // no recall from other conversations' transcripts
+      experimental: { sessionMemory: false },          // don't index session transcripts
+    },
+  },
+  plugins: {
+    slots: { memory: "none" },                         // no active memory plugin
+    entries: {
+      "memory-core": { config: { dreaming: { enabled: false } } },  // no nightly "dreaming" promotion/diary
+      "active-memory": { enabled: false },
+      "memory-wiki": { enabled: false },
+    },
+  },
+  hooks: { internal: { entries: { "session-memory": { enabled: false } } } },  // don't save chats to memory/
+  session: { maintenance: { pruneAfter: "14d" } },     // archive/remove old conversations after 2 weeks
+  cron: { sessionRetention: "24h" },                   // scheduled-brief sessions kept 1 day
+  transcripts: { enabled: false },                     // no meeting-transcript capture
+}
+// After applying, purge what was already stored (inside the container):
+//   docker exec openclaw openclaw memory reset                      # clear the memory index + embedding cache
+//   docker exec openclaw sh -c 'rm -rf ~/.openclaw/workspace/memory/* ; : > ~/.openclaw/workspace/DREAMS.md'
+//   (OpenClaw state lives on the laptop at ~/dingding/docker/state/workspace/{memory,DREAMS.md})

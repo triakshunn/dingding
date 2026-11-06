@@ -1,0 +1,10 @@
+[project]
+name = "dingding"
+version = "0.1.0"
+description = "Privacy-first personal email, calendar and Notion agent: a local model filters what the cloud model sees."
+requires-python = ">=3.13"
+dependencies = [
+    "dateparser>=1.5.0",
+    "google-api-python-client>=2.201.0",
+    "google-auth-oauthlib>=1.5.0",
+]

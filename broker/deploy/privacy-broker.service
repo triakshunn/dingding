@@ -1,0 +1,32 @@
+[Unit]
+Description=Privacy broker (holds Gmail/Notion keys; filters reads to the OpenClaw container; never sends email)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/dingding
+Environment=PYTHONUNBUFFERED=1
+Environment=NOTION_TOKEN_FILE=%h/.local/share/privacy-broker/notion_token
+Environment=BROKER_SOCK=%h/dingding/docker/broker-io/broker.sock
+Environment=BROKER_CACHE=%h/.local/share/privacy-broker
+Environment=PRIVACY_STATE=%h/.local/share/privacy-broker/mappings
+# Local filter model (benchmark winner: 28/30, ~12 s/email). Fallback if memory is tight: qwen3:8b
+Environment=PRIVACY_MODEL=hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:UD-Q2_K_XL
+Environment=PRIVACY_TIMEOUT=900
+Environment=PRIVACY_RETENTION_DAYS=30
+Environment=PRIVACY_KEEP_ALIVE=24h
+# Ollama guidance (Ollama is a system service; this needs sudo, run once by the user):
+#   sudo systemctl edit ollama   ->  [Service]
+#                                    Environment=OLLAMA_KEEP_ALIVE=24h       # keep the 30B loaded (12 GB) instead of reloading
+#                                    Environment=OLLAMA_MAX_LOADED_MODELS=1  # never hold two models in RAM
+#                                    Environment=OLLAMA_NUM_PARALLEL=1       # the broker runs one model job at a time anyway
+#   sudo systemctl restart ollama
+#   ollama rm qwen3:8b deepseek-r1:1.5b llama3.2:latest llama3.2:1b   # optional: free disk
+ExecStart=%h/dingding/.venv/bin/python -W ignore broker/server.py
+Restart=always
+RestartSec=10
+# The local model is CPU-heavy; keep the rest of the system responsive.
+Nice=5
+
+[Install]
+WantedBy=default.target

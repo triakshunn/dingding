@@ -1,0 +1,8 @@
+[Unit]
+Description=Home agent watchdog (Telegram alert if OpenClaw, broker, Ollama, briefs or backups fail)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dingding/ops
+Environment=TELEGRAM_CHAT_ID=YOUR_TELEGRAM_USER_ID
+ExecStart=%h/dingding/.venv/bin/python -W ignore watchdog.py

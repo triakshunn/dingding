@@ -1,0 +1,9 @@
+[Unit]
+Description=Sunday mail cleanup (spam + old promotions/social -> Trash, via the privacy broker)
+After=privacy-broker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dingding/ops
+Environment=TELEGRAM_CHAT_ID=YOUR_TELEGRAM_USER_ID
+ExecStart=%h/dingding/.venv/bin/python -W ignore weekly_cleanup.py

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[oc]
+.venv/
+.pytest_cache/
+
+# Secrets and personal data: NEVER commit
+credentials.json
+client_secret*.json
+data/
+tokens/
+*.token
+notion_token
+config.json
+pending.json
+.pending.lock
+*.jsonl
+
+# Runtime (Docker)
+docker/state/
+docker/broker-io/

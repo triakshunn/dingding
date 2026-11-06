@@ -1,0 +1,27 @@
+# OpenClaw in a locked-down container. It holds NO Gmail/Notion keys: it can only talk to the privacy
+# broker on the host through ./broker-io/broker.sock.
+#   start/update:  docker compose up -d --build      logs:  docker compose logs -f
+#   CLI:           docker compose exec openclaw openclaw <command>
+services:
+  openclaw:
+    build: .
+    image: dingding-openclaw:2026.10.6
+    container_name: openclaw
+    restart: unless-stopped
+    environment:
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      TZ: ${TZ:-UTC}
+    ports:
+      - "127.0.0.1:18789:18789"            # dashboard reachable from this machine only
+    volumes:
+      - ./state:/home/node/.openclaw                         # OpenClaw settings, sign-ins, skills
+      - ../broker/client:/home/node/dingding/bin:ro          # broker clients only (no keys)
+      - ./broker-io:/home/node/broker-io                     # privacy broker socket
+    # Nothing else from your home folder is visible inside. No Docker socket.
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 1gb                          # Chromium needs shared memory
+    mem_limit: 4g
+    pids_limit: 512
