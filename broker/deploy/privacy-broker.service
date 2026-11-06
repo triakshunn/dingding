@@ -12,7 +12,7 @@ Environment=BROKER_CACHE=%h/.local/share/privacy-broker
 Environment=PRIVACY_STATE=%h/.local/share/privacy-broker/mappings
 # Local filter model (benchmark winner: 28/30, ~12 s/email). Fallback if memory is tight: qwen3:8b
 Environment=PRIVACY_MODEL=hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:UD-Q2_K_XL
-Environment=PRIVACY_TIMEOUT=900
+Environment=PRIVACY_TIMEOUT=180
 Environment=PRIVACY_RETENTION_DAYS=30
 Environment=PRIVACY_KEEP_ALIVE=24h
 # Ollama guidance (Ollama is a system service; this needs sudo, run once by the user):

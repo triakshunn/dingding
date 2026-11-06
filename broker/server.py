@@ -9,8 +9,8 @@ Runs on the host, holds ALL keys (full Gmail logins, Notion key). The container 
 Protocol: one JSON object per line -> {"op": "...", "args": {...}}; reply {"ok": true, "result": ...} or
 {"ok": false, "error": "..."}.
 
-A single worker runs every job (one model job at a time) from a priority queue:
-  1 = your requests · 2 = new-email pre-filtering (polled every 5 min) · 3 = Notion pre-filtering (changed pages)
+Two lanes, one worker each: the user lane (your requests) never waits behind the background lane
+(2 = new-email pre-filtering every 5 min · 3 = Notion pre-filtering). Ollama itself runs one model call at a time.
 """
 import argparse
 import datetime as dt
@@ -101,7 +101,8 @@ class Broker:
         _private_dir(self.cache / "mail")
         _private_dir(self.cache / "notion")
         _private_dir(self.cache / "notion_served")   # mapping_id last shown to the agent, per page
-        self.q = queue.PriorityQueue()
+        self.q = queue.PriorityQueue()        # background lane: pre-filtering mail / Notion, pruning
+        self.uq = queue.PriorityQueue()       # user lane: requests from the agent never wait behind background work
         self.seq = itertools.count()
         self._profiles = {}
         self.ops = {
@@ -125,15 +126,16 @@ class Broker:
 
     # ---------- queue ----------
 
-    def submit(self, priority, fn, *args):
+    def submit(self, priority, fn, *args, lane=None):
         done = threading.Event()
         box = {}
-        self.q.put((priority, next(self.seq), fn, args, done, box))
+        (lane or self.q).put((priority, next(self.seq), fn, args, done, box))
         return done, box
 
-    def worker(self):
+    def worker(self, lane=None):
+        lane = lane or self.q
         while True:
-            _, _, fn, args, done, box = self.q.get()
+            _, _, fn, args, done, box = lane.get()
             try:
                 box["result"] = fn(*args)
             except Refused as e:
@@ -150,7 +152,7 @@ class Broker:
         op = request.get("op")
         if op not in self.ops:
             return {"ok": False, "error": f"unknown op {op!r}"}
-        done, box = self.submit(1, self.ops[op], request.get("args") or {})
+        done, box = self.submit(1, self.ops[op], request.get("args") or {}, lane=self.uq)
         if not done.wait(timeout):
             return {"ok": False, "error": "timed out waiting for the laptop (it may be busy with the local model)"}
         return {"ok": False, "error": box["error"]} if "error" in box else {"ok": True, "result": box["result"]}
@@ -905,7 +907,8 @@ def serve(broker, sock_path, background=True):
     finally:
         os.umask(old)
     os.chmod(sock_path, 0o600)
-    threading.Thread(target=broker.worker, daemon=True).start()
+    threading.Thread(target=broker.worker, daemon=True).start()                 # background lane
+    threading.Thread(target=broker.worker, args=(broker.uq,), daemon=True).start()  # user lane
     if background:
         broker.pollers()
     print(f"privacy broker listening on {sock_path}", flush=True)
