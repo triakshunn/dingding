@@ -245,14 +245,10 @@ def test_locked_placeholders_and_edit_check():
 def test_model_requests_keep_alive(monkeypatch):
     sent = {}
 
-    class R:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def read(self): return b'{"message":{"content":"{}"}}'
-    def fake_urlopen(req, timeout):
-        import json as _j
-        sent.update(_j.loads(req.data))
-        return R()
-    monkeypatch.setattr(model.urllib.request, "urlopen", fake_urlopen)
+    class Conn:
+        def close(self): pass
+    monkeypatch.setattr(model, "_connect", lambda: (Conn(), "/api/chat"))
+    monkeypatch.setattr(model, "_exchange", lambda conn, path, body: sent.update(body) or {})
     model.call("s", "u", {})
     assert sent["keep_alive"] and sent["model"] == model.model_name()
+    assert sent["options"]["num_predict"] == model.max_tokens()

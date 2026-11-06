@@ -5,7 +5,25 @@ from . import config, model, patterns, store
 
 PLACEHOLDER_RE = re.compile(r"\[[A-Z]+_\d+\]")
 EMAIL_LIMIT = 2000
-PAGE_CHUNK = 3000
+PAGE_CHUNK = 3000          # on-demand (user waiting): one model call over the start of the page
+BG_PAGE_CHUNK = 1200       # background: small calls so a user request never waits long for the model
+BG_PAGE_MAX_CHUNKS = 5     # background covers up to ~6,000 characters per page
+
+
+def _chunks(text: str, size: int, limit: int) -> list[str]:
+    """Split on line breaks into pieces of about `size` characters (at most `limit` pieces)."""
+    out, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > size:                      # very long line: hard split
+            if cur:
+                out.append(cur); cur = ""
+            out.append(line[:size]); line = line[size:]
+        if len(cur) + len(line) > size and cur:
+            out.append(cur); cur = ""
+        cur += line
+    if cur:
+        out.append(cur)
+    return out[:limit] or [""]
 
 
 def _replace_value(text: str, value: str, ph: str) -> str:
@@ -121,6 +139,8 @@ def filter_email(msg: dict) -> dict:
         summary = out.get("summary") or ""
         events = [{"title": e.get("title", ""), "when": e.get("when", ""), "location": e.get("location", "")}
                   for e in out.get("events") or [] if isinstance(e, dict)]
+    except model.Preempted:
+        raise                      # cancelled for a user request: retry later, don't cache rules-only
     except Exception:
         result["bucket"] = _heuristic_bucket(sender, subject, body)
         summary = f"{subject}: {_first_sentence(body)}" if subject else _first_sentence(body)
@@ -143,15 +163,23 @@ def filter_page(page: dict) -> dict:
     headings = [l.strip() for l in r_text.splitlines() if re.match(r"^\s*#{1,3}\s", l)]
     gist, model_used = "", False
     try:
-        out = model.call(model.PAGE_SYSTEM, f"Title: {r_title}\n\n{r_text[:PAGE_CHUNK]}", model.PAGE_SCHEMA)
+        parts = (_chunks(r_text, BG_PAGE_CHUNK, BG_PAGE_MAX_CHUNKS) if model.in_background()
+                 else [r_text[:PAGE_CHUNK]])
+        for i, part in enumerate(parts):
+            head = f"Title: {r_title}" + (f" (part {i + 1} of {len(parts)})" if len(parts) > 1 else "")
+            out = model.call(model.PAGE_SYSTEM, f"{head}\n\n{part}", model.PAGE_SCHEMA)
+            sensitive = sensitive or bool(out.get("sensitive"))
+            # Keep discoveries from completed chunks even if a later model call fails.
+            extra = _extras(out.get("extra_pii"), f"{title}\n{text}")
+            if extra:
+                r_title = _apply(title, mapping_id, extra)
+                r_text = _apply(text, mapping_id, extra)
+                headings = [l.strip() for l in r_text.splitlines() if re.match(r"^\s*#{1,3}\s", l)]
+            if i == 0:
+                gist = out.get("gist") or ""
         model_used = True
-        sensitive = sensitive or bool(out.get("sensitive"))
-        extra = _extras(out.get("extra_pii"), f"{title}\n{text}")
-        if extra:
-            r_title = _apply(title, mapping_id, extra)
-            r_text = _apply(text, mapping_id, extra)
-            headings = [l.strip() for l in r_text.splitlines() if re.match(r"^\s*#{1,3}\s", l)]
-        gist = out.get("gist") or ""
+    except model.Preempted:
+        raise                      # cancelled for a user request: retry later, don't cache rules-only
     except Exception:
         body_lines = [l for l in r_text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
         gist = _first_sentence(" ".join(body_lines[:5]))

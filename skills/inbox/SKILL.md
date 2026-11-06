@@ -24,6 +24,9 @@ Timezone: <YOUR_TIMEZONE, e.g. America/New_York>. Pass times as ISO 8601 local t
 ## Commands
 - `ia new` — unseen recent emails from all accounts: bucket, summary, events and (non-sensitive) redacted body. Sensitive emails show only the sender; `dropped` counts withheld security emails. Marks them seen. (`--peek` to not mark.)
 - `ia search "<gmail query>" [--account school] [--max 5]` — e.g. `ia search "from:landlord lease newer_than:60d"`.
+  Emails not seen before are each checked by the laptop's privacy model first (~30 s each), so a broad search can take
+  many minutes. That is normal, not a broken connection: tell the user it's running, let it finish (don't kill it), and
+  answer from the full results. Other `ia` commands (archive, calendar, pending) keep working meanwhile.
 - `ia read <account> <id>` — full email.
 - `ia suggest-event --title "..." --start ISO [--end ISO | --all-day] [--location "..."] --source <account>:<id>` → returns a pending number. Use for meetings, classes, appointments AND for deadlines/bills (title "⏰ Due: …", `--all-day`).
 - `ia suggest-reply --source <account>:<id> --why "<one line>"` → pending number for an email needing a reply.

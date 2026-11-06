@@ -1,0 +1,15 @@
+// Cut ChatGPT/Codex usage: send only the tool definitions the agent actually uses.
+// With tools.profile "full", every agent step carried ~129K characters of tool schemas (browser, media, nodes,
+// sessions, dashboards...); briefs take 15-28 steps, so most of the quota went to re-reading them.
+// This keeps: shell (exec/process for ia/nt), messaging, silent cron replies, skill reads, waiting on
+// background commands, and the web (browser, Codex-hosted web_search, web_fetch). ~32K characters per step.
+// Apply:     docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin < ops/openclaw-tools.patch.json5
+// Roll back: echo '{tools:{profile:"full",alsoAllow:null}}' | docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin
+// (verified with --dry-run against OpenClaw 2026.10.6; hot-reloads, no restart needed)
+{
+  tools: {
+    profile: "minimal",
+    alsoAllow: ["exec", "process", "message", "heartbeat_respond", "skills_read", "sessions_yield",
+                "browser", "web_search", "web_fetch"],
+  },
+}

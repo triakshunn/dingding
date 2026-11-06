@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import atexit, shutil  # noqa: E401
@@ -28,6 +29,7 @@ os.environ["NOTION_TOKEN_FILE"] = str(TMP / "notion_token")
 os.environ["PRIVACY_STATE"] = str(TMP / "mappings")
 os.environ["OLLAMA_URL"] = "http://127.0.0.1:9"          # closed port: model layer falls back to code-only
 os.environ["PRIVACY_TIMEOUT"] = "2"
+os.environ["PRIVACY_QUIET_SECONDS"] = "0"
 (TMP / "notion_token").write_text("ntn_FAKE_TOKEN_SHOULD_NEVER_LEAK")
 
 ROOT = Path(__file__).resolve().parents[2]          # repo root
@@ -438,6 +440,164 @@ class BrokerTests(unittest.TestCase):
             self.assertEqual((c["total"], c["more_not_included"]), (4, 2))
         finally:
             server.CLEANUP_MAX = old
+
+    def test_13_preempted_requeued_and_model_retries_capped(self):
+        calls = []
+        def job():
+            calls.append(1)
+            if len(calls) == 1:
+                raise privacy.model.Preempted()
+            return "finished"
+        done, box = BROKER.submit(3, job)
+        self.assertTrue(done.wait(30))
+        self.assertEqual((box.get("result"), len(calls)), ("finished", 2))   # re-queued, not failed
+        # model is off in tests -> every page is rules-only; the background retries it at most MODEL_RETRIES times
+        for _ in range(server.MODEL_RETRIES + 2):
+            BROKER.submit(3, BROKER._scan_notion)
+            d, _ = BROKER.submit(9, lambda: None)
+            self.assertTrue(d.wait(60))
+        recs = [json.loads(f.read_text()) for f in (TMP / "cache" / "notion").glob("*.json")]
+        self.assertTrue(recs)
+        self.assertTrue(all(r["attempts"] == server.MODEL_RETRIES for r in recs), [r["attempts"] for r in recs])
+
+    def test_14_preempted_job_stays_pending_until_retry_finishes(self):
+        retry_started = threading.Event()
+        release_retry = threading.Event()
+        calls = []
+
+        def job():
+            calls.append(1)
+            if len(calls) == 1:
+                raise privacy.model.Preempted()
+            retry_started.set()
+            if not release_retry.wait(5):
+                raise RuntimeError("test did not release retry")
+            return "finished"
+
+        done, box = BROKER.submit(3, job)
+        try:
+            self.assertTrue(retry_started.wait(5))
+            self.assertFalse(done.is_set(), "cancelled attempt signalled completion")
+            self.assertNotIn("result", box)
+            # The other lane must stay usable while this retry is blocked.
+            self.assertEqual(BROKER.handle({"op": "accounts"}, timeout=1)["ok"], True)
+        finally:
+            release_retry.set()
+        self.assertTrue(done.wait(5))
+        self.assertEqual(box["result"], "finished")
+
+    def test_15_non_model_requests_reset_background_quiet_period(self):
+        # Scale the production two-minute window down, exercising the real two-worker scheduler.
+        with patch.dict(os.environ, {"PRIVACY_QUIET_SECONDS": "0.4"}):
+            self.assertTrue(BROKER.handle({"op": "accounts"})["ok"])
+            background, result = BROKER.submit(3, time.monotonic)
+            self.assertFalse(background.wait(0.25))
+            self.assertTrue(BROKER.handle({"op": "pending"})["ok"])
+            last_finished = time.monotonic()
+            self.assertFalse(background.wait(0.25), "second request did not reset cooldown")
+            self.assertTrue(background.wait(3))
+            self.assertGreaterEqual(result["result"] - last_finished, 0.35)
+
+    def test_16_queued_and_failed_requests_release_priority(self):
+        started, release = threading.Event(), threading.Event()
+
+        def slow_request():
+            started.set()
+            if not release.wait(5):
+                raise RuntimeError("test did not release request")
+            raise server.Refused("test refusal")
+
+        with patch.dict(os.environ, {"PRIVACY_QUIET_SECONDS": "0.2"}):
+            first, first_box = BROKER.submit(1, slow_request, lane=BROKER.uq)
+            try:
+                self.assertTrue(started.wait(2))
+                second, second_box = BROKER.submit(1, lambda: "user", lane=BROKER.uq)
+                background, bg_box = BROKER.submit(3, lambda: "background")
+                self.assertFalse(second.is_set())
+                self.assertFalse(background.wait(0.3), "background ran while user work was queued")
+            finally:
+                release.set()
+            self.assertTrue(first.wait(3))
+            self.assertTrue(second.wait(3))
+            self.assertEqual(first_box["error"], "test refusal")
+            self.assertEqual(second_box["result"], "user")
+            self.assertTrue(background.wait(3), "failed request leaked its priority reservation")
+            self.assertEqual(bg_box["result"], "background")
+
+    def test_17_non_model_request_preempts_and_retries_background(self):
+        entered, cancelled = threading.Event(), threading.Event()
+        calls = []
+
+        class Connection:
+            @property
+            def sock(self):
+                return self
+
+            def shutdown(self, how):
+                cancelled.set()
+
+            def close(self):
+                pass
+
+        def exchange(*args):
+            calls.append(time.monotonic())
+            if len(calls) == 1:
+                entered.set()
+                if not cancelled.wait(5):
+                    raise RuntimeError("background was not cancelled")
+                raise OSError("connection cancelled")
+            return {"finished": True}
+
+        with patch.dict(os.environ, {"PRIVACY_QUIET_SECONDS": "0.2"}), \
+                patch.object(privacy.model, "_last_user", 0.0), \
+                patch.object(privacy.model, "_connect", return_value=(Connection(), "/api/chat")), \
+                patch.object(privacy.model, "_exchange", side_effect=exchange):
+            done, box = BROKER.submit(3, privacy.model.call, "s", "background", {})
+            try:
+                self.assertTrue(entered.wait(3))
+                self.assertTrue(BROKER.handle({"op": "accounts"})["ok"])
+                finished = time.monotonic()
+                self.assertTrue(cancelled.is_set())
+                self.assertFalse(done.wait(0.1))
+                self.assertTrue(done.wait(3))
+                self.assertEqual(box["result"], {"finished": True})
+                self.assertEqual(len(calls), 2)
+                self.assertGreaterEqual(calls[1] - finished, 0.15)
+            finally:
+                cancelled.set()
+                done.wait(5)
+
+    def test_18_fast_requests_skip_a_busy_model_lane(self):
+        # Live bug 2026-11-06: `ia search --max 100` filtered ~20 min of email on the user lane and
+        # `cal-list` / `mail-log` waited behind it until the agent gave up.
+        started, release = threading.Event(), threading.Event()
+
+        def slow_model_request():
+            started.set()
+            release.wait(10)
+            return "slow"
+
+        slow, slow_box = BROKER.submit(1, slow_model_request, lane=BROKER.uq)
+        try:
+            self.assertTrue(started.wait(2))
+            for op in ("mail.log", "cal.list", "pending", "mail.recent", "accounts"):
+                t0 = time.monotonic()
+                r = BROKER.handle({"op": op}, timeout=3)
+                self.assertTrue(r["ok"], (op, r))
+                self.assertLess(time.monotonic() - t0, 2, op)
+            # model-needing requests still queue on the model lane
+            box = {}
+            th = threading.Thread(target=lambda: box.update(BROKER.handle({"op": "mail.read", "args": {
+                "account": "personal", "id": "a1"}})))
+            th.start()
+            th.join(0.3)
+            self.assertTrue(th.is_alive(), "model op should wait for the model lane")
+        finally:
+            release.set()
+        self.assertTrue(slow.wait(3))
+        th.join(3)
+        self.assertTrue(box["ok"])
+        self.assertEqual(slow_box["result"], "slow")
 
     def test_99_no_secrets_leaked(self):
         blob = "\n".join(OUTPUTS)
