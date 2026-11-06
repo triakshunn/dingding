@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.svg" width="100%" alt="dingding: a hooded keeper with a glowing staff guards the gate between your tower and the cloud city. Plain letters pass with secrets blacked out; sealed scrolls stay behind.">
+</p>
+
 # dingding
 
 A privacy-first personal assistant for **Gmail, Google Calendar and Notion**, chatted with over Telegram.
