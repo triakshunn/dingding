@@ -11,6 +11,7 @@ Top-level areas: <!-- EDIT: e.g. **School** and **Personal** -->. Databases: run
 
 ## Running commands (every extra step costs the user's quota)
 - Run `nt` with the `exec` tool and wait for the result. Don't background commands, don't poll, don't use `process`.
+  If it reports "Script running", call `wait` ONCE with `yield_time_ms: 300000`; never short waits.
 - Put independent commands in ONE exec call joined with `;`. Don't list or search your tools.
 - At most one progress message, only for tasks clearly over a minute; then one final answer.
 

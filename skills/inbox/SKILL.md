@@ -14,6 +14,7 @@ Timezone: <YOUR_TIMEZONE, e.g. America/New_York>. Pass times as ISO 8601 local t
 
 ## Running commands (every extra step costs the user's quota)
 - Run `ia`/`nt` with the `exec` tool and wait for the result (it waits up to ~10 min). Don't background commands, don't poll, and don't use `process`.
+  If it reports "Script running", call `wait` ONCE with `yield_time_ms: 300000`; never short waits.
 - Do the whole task in as few steps as possible: put independent commands in ONE exec call joined with `;`
   (e.g. `ia pending; ia recent; ia cal-list --days 14`).
 - Don't list or search your tools. Read a skill once per conversation at most.
@@ -61,6 +62,8 @@ Every reminder that fires runs you once (it costs the user's quota), so:
   renewals and free-trial endings, subscriptions, emails you sent that are still waiting for a reply, upcoming flights
   with check-in time and link, flight price watches. `ia track dismiss ID…` hides items the user doesn't care about.
   Items marked `"private": true` came from a sensitive email: show only "🔒 private bill due <date>".
+  Questions about bills/subscriptions/flights: answer from `ia track` only. If it's empty, say the tracker has
+  nothing coming up (it reads the last 30 days of mail); don't run broad searches unless the user asks you to search.
 - `ia flight-watch add FROM TO YYYY-MM-DD [--return YYYY-MM-DD] [--max-price N]` (IATA codes, e.g. DTW BOM) · `list` ·
   `rm ID`. Prices come from Google Flights about once a day; the laptop sends a Telegram alert on a real drop.
   Only on the user's request. Follow-up on a "waiting" item = `ia suggest-reply --source <ref>` then `ia draft`
