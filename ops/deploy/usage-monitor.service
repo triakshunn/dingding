@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenClaw usage metadata monitor (no model calls)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/dingding
+ExecStart=%h/dingding/.venv/bin/python ops/usage_monitor.py
+UMask=0077
+Nice=10
+NoNewPrivileges=yes
+TimeoutStartSec=60

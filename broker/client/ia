@@ -2,6 +2,7 @@
 """`ia` — email & calendar commands (container side). Same commands as before; everything goes through the
 privacy broker on the laptop, which filters what you can read. You cannot send email.
 
+  ia brief [--morning|--midday|--evening] [--peek]   everything a brief needs in ONE call (new mail, calendar, pending)
   ia accounts | ia new [--peek] [--max 40] | ia search "<gmail query>" [--account A] [--max 5]
   ia read <account> <message_id>
   ia suggest-event --title T --start ISO [--end ISO | --all-day] [--location L] [--source account:id]
@@ -9,11 +10,15 @@ privacy broker on the laptop, which filters what you can read. You cannot send e
   ia pending | ia dismiss N… | ia cal-add N… | ia cal-add-new --title … --start … | ia cal-list [--days 7]
   ia draft N --body "<text>"
   ia recent [--bucket skip|headsup|event|action|reply|private]     emails shown in recent checks/briefs
-  ia archive <ref|N>… [--bucket B [--batch 1]] [--confirmed] [--keep-unread]   (Inbox label only; undoable)
+  ia archive <ref|N>… [--bucket B|all [--batch 1]] [--confirmed] [--keep-unread]   (Inbox label only; undoable)
+             --bucket all = every email in that brief/check (batch 1 = latest); preview, then --confirmed
   ia unarchive [batch_id]                                                  undo the last archive
   ia cleanup --area promotions|social|updates|forums|spam … [--older-than DAYS] [--action trash|archive]
              [--account A …]        → preview + plan id (nothing changes yet)
   ia cleanup --confirm <plan_id>    → carry out exactly that preview (after the user's yes)
+  ia track [bills|waiting|flights|watches]       trackers (bills & subscriptions, waiting for a reply, flights, price watches)
+  ia track dismiss ID…                            hide tracker items that don't matter
+  ia flight-watch add FROM TO YYYY-MM-DD [--return YYYY-MM-DD] [--max-price N] · list · rm ID
   ia mail-log                        recent archive/cleanup batches  ·  ia undo-mail [batch_id]  undo one
 """
 import argparse
@@ -28,6 +33,10 @@ def main():
     ap = argparse.ArgumentParser(prog="ia")
     sp = ap.add_subparsers(dest="cmd", required=True)
     sp.add_parser("accounts")
+    p = sp.add_parser("brief"); p.add_argument("--peek", action="store_true"); p.add_argument("--max", type=int, default=40)
+    g = p.add_mutually_exclusive_group()
+    for k in ("morning", "midday", "evening"):
+        g.add_argument("--" + k, dest="kind", action="store_const", const=k)
     p = sp.add_parser("new"); p.add_argument("--peek", action="store_true"); p.add_argument("--max", type=int, default=40)
     p = sp.add_parser("search"); p.add_argument("query"); p.add_argument("--account"); p.add_argument("--max", type=int, default=5)
     p = sp.add_parser("read"); p.add_argument("account"); p.add_argument("id")
@@ -53,6 +62,10 @@ def main():
     p.add_argument("--older-than", type=int, default=0); p.add_argument("--action", default="trash")
     p.add_argument("--account", action="append", default=[]); p.add_argument("--confirm")
     sp.add_parser("mail-log")
+    p = sp.add_parser("track"); p.add_argument("what", nargs="?", choices=["bills", "waiting", "flights", "watches", "dismiss"])
+    p.add_argument("ids", nargs="*")
+    p = sp.add_parser("flight-watch"); p.add_argument("action", choices=["add", "list", "rm"]); p.add_argument("args", nargs="*")
+    p.add_argument("--return", dest="ret"); p.add_argument("--max-price", type=float)
     a = ap.parse_args()
 
     ev = lambda: dict(title=a.title, start=a.start, end=a.end, all_day=a.all_day, location=a.location)  # noqa: E731
@@ -93,6 +106,23 @@ def main():
         else:
             out(call("mail.cleanup", areas=a.area, older_than_days=a.older_than, action=a.action,
                      accounts=a.account or None))
+    elif a.cmd == "brief":
+        out(call("brief", kind=a.kind, peek=a.peek, max=a.max))
+    elif a.cmd == "track":
+        if a.what == "dismiss":
+            out(call("track.dismiss", ids=a.ids))
+        else:
+            out(call("track", what=a.what))
+    elif a.cmd == "flight-watch":
+        if a.action == "add":
+            if len(a.args) != 3:
+                ap.error("flight-watch add FROM TO YYYY-MM-DD")
+            out(call("flight-watch.add", **{"from": a.args[0], "to": a.args[1], "depart": a.args[2],
+                                            "return": a.ret, "max_price": a.max_price}))
+        elif a.action == "rm":
+            out(call("flight-watch.rm", id=(a.args or [""])[0]))
+        else:
+            out(call("flight-watch.list"))
     elif a.cmd == "mail-log":
         out(call("mail.log"))
     elif a.cmd in ("unarchive", "undo-mail"):

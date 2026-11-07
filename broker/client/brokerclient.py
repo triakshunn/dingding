@@ -1,4 +1,5 @@
 """Tiny stdlib-only client for the privacy broker socket (used inside the container; holds no keys)."""
+
 import json
 import os
 import socket
@@ -13,7 +14,9 @@ def call(op, **args):
     try:
         s.connect(SOCK)
     except OSError as e:
-        sys.exit(f"Can't reach the privacy broker at {SOCK} ({e}). Is it running on the laptop?")
+        sys.exit(
+            f"Can't reach the privacy broker at {SOCK} ({e}). Is it running on the laptop?"
+        )
     s.sendall((json.dumps({"op": op, "args": args}) + "\n").encode())
     buf = b""
     while not buf.endswith(b"\n"):
@@ -29,4 +32,6 @@ def call(op, **args):
 
 
 def out(obj):
-    print(json.dumps(obj, ensure_ascii=False, indent=1))
+    print(
+        json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    )  # compact: the agent pays per character

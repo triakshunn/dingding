@@ -7,6 +7,7 @@ One alert per problem per 6 hours, plus a one-time "recovered" note. Never sends
   python watchdog.py            # check and alert
   python watchdog.py --dry-run  # check and print what it WOULD send
 """
+
 import argparse
 import json
 import os
@@ -19,27 +20,49 @@ import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
-SOCK = Path(os.environ.get("BROKER_SOCK", HOME / "dingding/docker/broker-io/broker.sock"))
+SOCK = Path(
+    os.environ.get(
+        "BROKER_SOCK", HOME / "dingding/docker/broker-io/broker.sock"
+    )
+)
 OPENCLAW_CONFIG = HOME / "dingding/docker/state/openclaw.json"
 BACKUPS = HOME / "notion-backups"
 STATE = HOME / ".local/share/watchdog/state.json"
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")   # your Telegram user id (set in watchdog.service)
 OLLAMA = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 CONTAINER = os.environ.get("WATCHDOG_CONTAINER", "openclaw")
+MIN_FREE_DISK = 0.10  # alert below 10 % free
+BACKUP_MAX_AGE_HOURS = 30  # nightly backup + 6 h grace
 BRIEF_JOBS = ("Morning brief", "Midday update", "Evening update")
 REALERT_SECONDS = 6 * 3600
 RECHECK_SECONDS = 30
 
 
 def run(cmd, timeout=60):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    p = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout, check=False
+    )
     return p.returncode, p.stdout, p.stderr
 
 
 # ---------- checks: each returns None (ok) or a short problem description ----------
 
+BREAKER = (
+    Path(__file__).resolve().parents[1] / "data/usage/breaker.json"
+)  # set by usage_monitor.py
+
+
 def check_container():
-    rc, out, _ = run(["docker", "inspect", "--format", "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}", CONTAINER])
+    if BREAKER.exists():
+        return None  # deliberately stopped (usage breaker or --pause); resume with usage_monitor.py --resume
+    rc, out, _ = run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            CONTAINER,
+        ]
+    )
     if rc != 0:
         return "OpenClaw container not found"
     status = out.split()
@@ -54,7 +77,9 @@ def check_broker():
     if not SOCK.exists():
         return "Privacy broker isn't running (no socket)"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(300)  # the broker answers through its queue; it may be busy with the local model for a while
+    s.settimeout(
+        300
+    )  # the broker answers through its queue; it may be busy with the local model for a while
     try:
         s.connect(str(SOCK))
         s.sendall(b'{"op": "accounts", "args": {}}\n')
@@ -65,13 +90,17 @@ def check_broker():
                 break
             buf += chunk
         resp = json.loads(buf or b"{}")
-    except socket.timeout:
+    except TimeoutError:
         return "Privacy broker is not answering (5 min timeout)"
     except (OSError, ValueError) as e:
         return f"Privacy broker error: {type(e).__name__}"
     finally:
         s.close()
-    return None if resp.get("ok") else f"Privacy broker returned an error: {str(resp.get('error'))[:120]}"
+    return (
+        None
+        if resp.get("ok")
+        else f"Privacy broker returned an error: {str(resp.get('error'))[:120]}"
+    )
 
 
 def check_ollama():
@@ -86,11 +115,18 @@ def check_ollama():
 def check_disk():
     u = shutil.disk_usage(HOME)
     free = u.free / u.total
-    return None if free > 0.10 else f"Disk almost full: {free:.0%} free"
+    return (
+        None if free > MIN_FREE_DISK else f"Disk almost full: {free:.0%} free"
+    )
 
 
 def check_briefs():
-    rc, out, err = run(["docker", "exec", CONTAINER, "openclaw", "cron", "list", "--json"], timeout=90)
+    if BREAKER.exists():
+        return None  # OpenClaw deliberately stopped: no briefs expected
+    rc, out, _err = run(
+        ["docker", "exec", CONTAINER, "openclaw", "cron", "list", "--json"],
+        timeout=90,
+    )
     if rc != 0:
         return "Couldn't read the brief schedule from OpenClaw"
     data = json.loads(out)
@@ -106,10 +142,15 @@ def check_briefs():
             problems.append(f"'{name}' is disabled")
             continue
         st = job.get("state") or {}
-        if st.get("lastRunAtMs") and st.get("lastRunStatus") not in (None, "ok"):
+        if st.get("lastRunAtMs") and st.get("lastRunStatus") not in (
+            None,
+            "ok",
+        ):
             problems.append(f"'{name}' last run: {st.get('lastRunStatus')}")
         if st.get("consecutiveErrors", 0) >= 1:
-            problems.append(f"'{name}' failed {st['consecutiveErrors']}× in a row")
+            problems.append(
+                f"'{name}' failed {st['consecutiveErrors']}× in a row"
+            )
         nxt = st.get("nextRunAtMs") or job.get("nextRunAtMs")
         if nxt and now_ms - nxt > 45 * 60 * 1000:
             problems.append(f"'{name}' is overdue (missed its run)")
@@ -124,30 +165,64 @@ def check_backup():
         return "No Notion backups found"
     newest = max(d.stat().st_mtime for d in days)
     hours = (time.time() - newest) / 3600
-    return None if hours < 30 else f"Last Notion backup was {hours:.0f} h ago"
+    return (
+        None
+        if hours < BACKUP_MAX_AGE_HOURS
+        else f"Last Notion backup was {hours:.0f} h ago"
+    )
 
 
-CHECKS = {"container": check_container, "broker": check_broker, "ollama": check_ollama,
-          "disk": check_disk, "briefs": check_briefs, "backup": check_backup}
+CHECKS = {
+    "container": check_container,
+    "broker": check_broker,
+    "ollama": check_ollama,
+    "disk": check_disk,
+    "briefs": check_briefs,
+    "backup": check_backup,
+}
 
 
 # ---------- alerting ----------
 
+
+def chat_id():
+    """Returns the owner's Telegram chat id.
+
+    TELEGRAM_CHAT_ID wins; otherwise the first `telegram:<id>` entry of
+    OpenClaw's commands.ownerAllowFrom (the person who owns the bot).
+    """
+    if os.environ.get("TELEGRAM_CHAT_ID"):
+        return os.environ["TELEGRAM_CHAT_ID"]
+    owners = json.loads(OPENCLAW_CONFIG.read_text()).get("commands", {})
+    for entry in owners.get("ownerAllowFrom", []):
+        if str(entry).startswith("telegram:"):
+            return str(entry).split(":", 1)[1]
+    return ""
+
+
 def bot_token():
-    return json.loads(OPENCLAW_CONFIG.read_text())["channels"]["telegram"]["botToken"]
+    return json.loads(OPENCLAW_CONFIG.read_text())["channels"]["telegram"][
+        "botToken"
+    ]
 
 
 def send(text, dry):
     if dry:
         print("[dry-run] would send:", text)
         return
-    if not CHAT_ID:
-        print("TELEGRAM_CHAT_ID not set; not sending:", text)
+    owner = chat_id()
+    if not owner:
+        print(
+            "No Telegram chat id (TELEGRAM_CHAT_ID / ownerAllowFrom); not sending:",
+            text,
+        )
         return
-    data = urllib.parse.urlencode({"chat_id": CHAT_ID, "text": text}).encode()
+    data = urllib.parse.urlencode({"chat_id": owner, "text": text}).encode()
     url = f"https://api.telegram.org/bot{bot_token()}/sendMessage"
     try:
-        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20).read()
+        urllib.request.urlopen(
+            urllib.request.Request(url, data=data), timeout=20
+        ).read()
     except Exception as e:  # noqa: BLE001  (never echo the URL: it contains the token)
         print(f"telegram send failed: {type(e).__name__}")
 
@@ -155,13 +230,16 @@ def send(text, dry):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--only", help="comma-separated subset of checks: " + ",".join(CHECKS))
+    ap.add_argument(
+        "--only", help="comma-separated subset of checks: " + ",".join(CHECKS)
+    )
     a = ap.parse_args()
     STATE.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE.parent, 0o700)
     state = json.loads(STATE.read_text()) if STATE.exists() else {}
     now = time.time()
     names = a.only.split(",") if a.only else list(CHECKS)
+
     def check(name):
         try:
             return CHECKS[name]()
@@ -170,7 +248,9 @@ def main():
 
     for name in names:
         problem = check(name)
-        if problem and not a.dry_run:      # ride out planned restarts: confirm once more before alerting
+        if (
+            problem and not a.dry_run
+        ):  # ride out planned restarts: confirm once more before alerting
             time.sleep(RECHECK_SECONDS)
             problem = check(name)
         prev = state.get(name, {})

@@ -3,9 +3,22 @@
 Runs ON THE LAPTOP ONLY (host). Raw email/Notion text goes in; redacted text, summaries and labels come out.
 The placeholder<->value mappings are stored host-side (PRIVACY_STATE) and must never be mounted into the container.
 """
-from .core import check_edit_preserves, filter_email, filter_page, locked_placeholders, redact, rehydrate
 
-__all__ = ["filter_email", "filter_page", "redact", "rehydrate", "locked_placeholders", "check_edit_preserves"]
+from .core import check_edit_preserves
+from .core import filter_email
+from .core import filter_page
+from .core import locked_placeholders
+from .core import redact
+from .core import rehydrate
+
+__all__ = [
+    "check_edit_preserves",
+    "filter_email",
+    "filter_page",
+    "locked_placeholders",
+    "redact",
+    "rehydrate",
+]
 
 # Model: PRIVACY_MODEL defaults to the Qwen3-30B-A3B (UD-Q2_K_XL) build; requests pass keep_alive (default 30m) so it
 # stays loaded between jobs. Only one model should be loaded at a time on this 22 GB laptop: after cutover the old

@@ -4,7 +4,54 @@ version = "0.1.0"
 description = "Privacy-first personal email, calendar and Notion agent: a local model filters what the cloud model sees."
 requires-python = ">=3.13"
 dependencies = [
-    "dateparser>=1.5.0",
+    "airportsdata==20260905",
     "google-api-python-client>=2.201.0",
     "google-auth-oauthlib>=1.5.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.2",
+]
+
+# Style: Google Python Style Guide (https://google.github.io/styleguide/pyguide.html).
+# `ruff format` is Black/Pyink-compatible; `ruff check` covers most of Google's pylint rules.
+[tool.ruff]
+line-length = 80
+indent-width = 4
+target-version = "py313"
+extend-exclude = ["docs", "openclaw-skill"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F",      # pycodestyle + pyflakes
+    "I",                # import order (Google groups)
+    "N",                # naming
+    "D",                # docstrings
+    "B",                # bugbear (mutable defaults, etc.)
+    "BLE",              # blind `except Exception`
+    "UP",               # modern Python
+    "SIM",              # simplifications
+    "PL",               # pylint
+    "RUF",              # ruff-specific
+]
+ignore = [
+    "D105", "D107",     # magic methods / __init__ need no docstring (Google: optional)
+    "PLR0913",          # too many arguments: judged case by case
+    "RUF001", "RUF003", # intentional unicode (emoji, arrows) in user-facing text
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+force-single-line = true             # Google: one import per line
+single-line-exclusions = ["typing", "collections.abc"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["D", "PLR2004", "N802", "PLR0911", "PLR0912"]  # fakes route on ifs
+"broker/client/*" = ["D"]
+
+[tool.ruff.lint.pylint]
+max-statements = 60
+max-branches = 15

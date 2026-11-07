@@ -6,6 +6,7 @@ Usage:
 
 Saves the login to tokens/<nickname>.json (readable only by you).
 """
+
 import os
 import sys
 from pathlib import Path
@@ -22,19 +23,23 @@ TOKENS = DATA / "tokens"
 
 MAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",  # read mail
-    "https://www.googleapis.com/auth/gmail.compose",   # create drafts (this code never sends)
-    "https://www.googleapis.com/auth/gmail.insert",    # drop the morning summary into the inbox
-    "https://www.googleapis.com/auth/gmail.modify",    # archive (remove Inbox label) when the user asks
+    "https://www.googleapis.com/auth/gmail.compose",  # create drafts (this code never sends)
+    "https://www.googleapis.com/auth/gmail.insert",  # drop the morning summary into the inbox
+    "https://www.googleapis.com/auth/gmail.modify",  # archive (remove Inbox label) when the user asks
 ]
 # Only calendars this app creates; it cannot touch your other calendars.
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.app.created"]
 
 
-READONLY_MAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]  # for the OpenClaw container: cannot send or draft
+READONLY_MAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly"
+]  # for the OpenClaw container: cannot send or draft
 
 
 def scopes_for(with_calendar: bool, readonly: bool = False) -> list[str]:
-    return (READONLY_MAIL_SCOPES if readonly else MAIL_SCOPES) + (CALENDAR_SCOPES if with_calendar else [])
+    return (READONLY_MAIL_SCOPES if readonly else MAIL_SCOPES) + (
+        CALENDAR_SCOPES if with_calendar else []
+    )
 
 
 def load(nickname: str) -> Credentials:
@@ -62,13 +67,29 @@ def main() -> None:
     with_calendar = "--calendar" in sys.argv
     readonly = "--readonly" in sys.argv
 
-    flow = InstalledAppFlow.from_client_secrets_file(HERE / "credentials.json", scopes_for(with_calendar, readonly))
-    print(f"Opening your browser. Sign in with the account you want to call '{nickname}'.")
-    creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
+    flow = InstalledAppFlow.from_client_secrets_file(
+        HERE / "credentials.json", scopes_for(with_calendar, readonly)
+    )
+    print(
+        f"Opening your browser. Sign in with the account you want to call '{nickname}'."
+    )
+    creds = flow.run_local_server(
+        port=0, prompt="consent", access_type="offline"
+    )
 
-    email = build("gmail", "v1", credentials=creds).users().getProfile(userId="me").execute()["emailAddress"]
+    email = (
+        build("gmail", "v1", credentials=creds)
+        .users()
+        .getProfile(userId="me")
+        .execute()["emailAddress"]
+    )
     save(TOKENS / f"{nickname}.json", creds)
-    print(f"\n✅ Connected '{nickname}' = {email}" + (" (with calendar)" if with_calendar else "") + (" [read-only]" if readonly else "") + f" -> {TOKENS}")
+    print(
+        f"\n✅ Connected '{nickname}' = {email}"
+        + (" (with calendar)" if with_calendar else "")
+        + (" [read-only]" if readonly else "")
+        + f" -> {TOKENS}"
+    )
 
 
 if __name__ == "__main__":

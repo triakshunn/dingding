@@ -1,15 +1,18 @@
-// Cut ChatGPT/Codex usage: send only the tool definitions the agent actually uses.
-// With tools.profile "full", every agent step carried ~129K characters of tool schemas (browser, media, nodes,
-// sessions, dashboards...); briefs take 15-28 steps, so most of the quota went to re-reading them.
-// This keeps: shell (exec/process for ia/nt), messaging, silent cron replies, skill reads, waiting on
-// background commands, and the web (browser, Codex-hosted web_search, web_fetch). ~32K characters per step.
-// Apply:     docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin < ops/openclaw-tools.patch.json5
-// Roll back: echo '{tools:{profile:"full",alsoAllow:null}}' | docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin
-// (verified with --dry-run against OpenClaw 2026.10.6; hot-reloads, no restart needed)
+// Cut ChatGPT/Codex usage. Every agent step re-sends the whole context, so the goal is fewer steps and fewer runs.
+// - Minimal tool profile + only what the agent uses: shell (exec), messaging, silent cron replies, skill reads,
+//   the web (browser, Codex-hosted web_search, web_fetch), and reminders from chat (automations).
+// - NO `process` tool: exec then always waits for the command (no backgrounding, no polling, and no extra
+//   "command finished" wake-up runs, which were ~40% of runs on 2026-11-06). 570 s cap stays under the
+//   harness's 600 s tool budget; a cut-off `ia search` is simply re-run (finished privacy checks are cached).
+// - Telegram DM history pasted into each run: 4 recent messages instead of 10.
+// Apply (container running):  docker compose -f ~/dingding/docker/compose.yaml exec -T openclaw openclaw config patch --stdin < ops/openclaw-tools.patch.json5
+// Roll back: echo '{tools:{profile:"full",alsoAllow:null,exec:{timeoutSeconds:null}},channels:{telegram:{dmHistoryLimit:null}}}' | (same command)
 {
   tools: {
     profile: "minimal",
-    alsoAllow: ["exec", "process", "message", "heartbeat_respond", "skills_read", "sessions_yield",
-                "browser", "web_search", "web_fetch"],
+    alsoAllow: ["exec", "message", "heartbeat_respond", "skills_read", "browser", "web_search", "web_fetch",
+                "automations"],   // reminders from chat; each firing = one short model run (rules in inbox skill)
+    exec: { timeoutSeconds: 570 },
   },
+  channels: { telegram: { dmHistoryLimit: 4 } },
 }

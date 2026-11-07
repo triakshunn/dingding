@@ -1,4 +1,5 @@
 """Host-only store mapping placeholders <-> real values. Never mount this into the container."""
+
 import json
 import os
 import re
@@ -9,7 +10,12 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def state_dir() -> Path:
-    d = Path(os.environ.get("PRIVACY_STATE", Path.home() / ".local/share/privacy-broker/mappings"))
+    d = Path(
+        os.environ.get(
+            "PRIVACY_STATE",
+            Path.home() / ".local/share/privacy-broker/mappings",
+        )
+    )
     d.mkdir(parents=True, exist_ok=True)
     os.chmod(d, 0o700)
     return d

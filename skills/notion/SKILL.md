@@ -9,6 +9,11 @@ metadata: {"openclaw": {"os": ["linux"]}}
 Use `~/dingding/bin/nt` for ALL Notion work (output is JSON). Never use the browser or other tools for Notion.
 Top-level areas: <!-- EDIT: e.g. **School** and **Personal** -->. Databases: run `nt dbs` (shows names and columns).
 
+## Running commands (every extra step costs the user's quota)
+- Run `nt` with the `exec` tool and wait for the result. Don't background commands, don't poll, don't use `process`.
+- Put independent commands in ONE exec call joined with `;`. Don't list or search your tools.
+- At most one progress message, only for tasks clearly over a minute; then one final answer.
+
 ## Hard rules
 1. **Creating new pages is fine** without asking (`nt create`). Tell the user what you created, with its link.
 2. **Changing or removing anything that already exists needs a yes first.** Before `nt append`, `nt set`, `nt move` or `nt archive`, show a short preview:

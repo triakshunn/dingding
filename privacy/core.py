@@ -1,25 +1,39 @@
 """Public API: redact, rehydrate, filter_email, filter_page."""
+
 import re
 
-from . import config, model, patterns, store
+from . import config
+from . import model
+from . import patterns
+from . import store
 
 PLACEHOLDER_RE = re.compile(r"\[[A-Z]+_\d+\]")
 EMAIL_LIMIT = 2000
-PAGE_CHUNK = 3000          # on-demand (user waiting): one model call over the start of the page
-BG_PAGE_CHUNK = 1200       # background: small calls so a user request never waits long for the model
-BG_PAGE_MAX_CHUNKS = 5     # background covers up to ~6,000 characters per page
+PAGE_CHUNK = (
+    3000  # on-demand (user waiting): one model call over the start of the page
+)
+BG_PAGE_CHUNK = 1200  # background: small calls so a user request never waits long for the model
+BG_PAGE_MAX_CHUNKS = 5  # background covers up to ~6,000 characters per page
+
+
+# Model-suggested extra strings to hide: shorter ones are noise, longer ones are prose.
+_EXTRA_MIN_LEN, _EXTRA_MAX_LEN = 4, 80
 
 
 def _chunks(text: str, size: int, limit: int) -> list[str]:
     """Split on line breaks into pieces of about `size` characters (at most `limit` pieces)."""
     out, cur = [], ""
-    for line in text.splitlines(keepends=True):
-        while len(line) > size:                      # very long line: hard split
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line
+        while len(line) > size:  # very long line: hard split
             if cur:
-                out.append(cur); cur = ""
-            out.append(line[:size]); line = line[size:]
+                out.append(cur)
+                cur = ""
+            out.append(line[:size])
+            line = line[size:]
         if len(cur) + len(line) > size and cur:
-            out.append(cur); cur = ""
+            out.append(cur)
+            cur = ""
         cur += line
     if cur:
         out.append(cur)
@@ -29,10 +43,14 @@ def _chunks(text: str, size: int, limit: int) -> list[str]:
 def _replace_value(text: str, value: str, ph: str) -> str:
     left = r"(?<![A-Za-z0-9])" if value[:1].isalnum() else ""
     right = r"(?![A-Za-z0-9])" if value[-1:].isalnum() else ""
-    return re.sub(left + re.escape(value) + right, ph.replace("\\", "\\\\"), text)
+    return re.sub(
+        left + re.escape(value) + right, ph.replace("\\", "\\\\"), text
+    )
 
 
-def _apply(text: str, mapping_id: str, extra: list[tuple[str, str]] = ()) -> str:
+def _apply(
+    text: str, mapping_id: str, extra: list[tuple[str, str]] = ()
+) -> str:
     """Redact regex hits + extra (kind, value) pairs + every value already known to the mapping."""
     if not text:
         return text or ""
@@ -56,12 +74,18 @@ def locked_placeholders(text: str) -> list[str]:
     return seen
 
 
-def check_edit_preserves(original_redacted: str, new_redacted: str) -> tuple[bool, list[str]]:
+def check_edit_preserves(
+    original_redacted: str, new_redacted: str
+) -> tuple[bool, list[str]]:
     """An edit by the cloud model must keep every hidden value: each placeholder in the original must still appear
-    (at least as many times) in the edited text. Returns (ok, missing_placeholders)."""
+    (at least as many times) in the edited text. Returns (ok, missing_placeholders).
+    """
     new = new_redacted or ""
-    missing = [ph for ph in locked_placeholders(original_redacted)
-               if new.count(ph) < (original_redacted or "").count(ph)]
+    missing = [
+        ph
+        for ph in locked_placeholders(original_redacted)
+        if new.count(ph) < (original_redacted or "").count(ph)
+    ]
     return (not missing, missing)
 
 
@@ -72,16 +96,22 @@ def redact(text: str, mapping_id: str | None = None) -> tuple[str, str]:
 
 def rehydrate(text: str, mapping_id: str) -> str:
     m = store.load(mapping_id)
-    return PLACEHOLDER_RE.sub(lambda x: m["values"].get(x.group(0), x.group(0)), text or "")
+    return PLACEHOLDER_RE.sub(
+        lambda x: m["values"].get(x.group(0), x.group(0)), text or ""
+    )
 
 
 def _extras(raw: list, original: str) -> list[tuple[str, str]]:
     out = []
-    for v in raw or []:
-        if not isinstance(v, str):
+    for item in raw or []:
+        if not isinstance(item, str):
             continue
-        v = v.strip()
-        if 4 <= len(v) <= 80 and not PLACEHOLDER_RE.fullmatch(v) and v in original:
+        v = item.strip()
+        if (
+            _EXTRA_MIN_LEN <= len(v) <= _EXTRA_MAX_LEN
+            and not PLACEHOLDER_RE.fullmatch(v)
+            and v in original
+        ):
             out.append(("PII", v))
     return out
 
@@ -89,13 +119,17 @@ def _extras(raw: list, original: str) -> list[tuple[str, str]]:
 def _heuristic_bucket(sender: str, subject: str, body: str) -> str:
     t = f"{subject}\n{body}".lower()
     s = (sender or "").lower()
-    if any(w in t for w in config.PROMO_WORDS) or "unsubscribe" in t and "noreply" in s:
+    if any(w in t for w in config.PROMO_WORDS) or (
+        "unsubscribe" in t and "noreply" in s
+    ):
         return "skip"
     if any(w in t for w in config.ACTION_WORDS):
         return "action"
     if any(w in t for w in config.EVENT_WORDS):
         return "event"
-    if "?" in body and not re.search(r"no-?reply|notification|alerts?@|mailer|news", s):
+    if "?" in body and not re.search(
+        r"no-?reply|notification|alerts?@|mailer|news", s
+    ):
         return "reply"
     return "headsup"
 
@@ -107,17 +141,31 @@ def _first_sentence(text: str, limit: int = 160) -> str:
 
 
 def filter_email(msg: dict) -> dict:
-    sender, subject, body = msg.get("from", ""), msg.get("subject", ""), msg.get("body", "") or ""
+    sender, subject, body = (
+        msg.get("from", ""),
+        msg.get("subject", ""),
+        msg.get("body", "") or "",
+    )
     mapping_id = store.new_id()
     drop = patterns.should_drop(subject, body)
-    rule_sensitive = patterns.sender_sensitive(sender) or patterns.keywords_sensitive(f"{subject}\n{body}")
+    rule_sensitive = patterns.sender_sensitive(
+        sender
+    ) or patterns.keywords_sensitive(f"{subject}\n{body}")
 
     r_subject = _apply(subject, mapping_id)
     r_body = _apply(body, mapping_id)
 
-    result = {"drop": drop, "sensitive": rule_sensitive or drop, "bucket": "headsup", "summary": "",
-              "events": [], "redacted_subject": r_subject, "redacted_body": r_body,
-              "mapping_id": mapping_id, "model_used": False}
+    result = {
+        "drop": drop,
+        "sensitive": rule_sensitive or drop,
+        "bucket": "headsup",
+        "summary": "",
+        "events": [],
+        "redacted_subject": r_subject,
+        "redacted_body": r_body,
+        "mapping_id": mapping_id,
+        "model_used": False,
+    }
 
     if drop:
         # Never send these anywhere, not even to the local model.
@@ -125,30 +173,49 @@ def filter_email(msg: dict) -> dict:
         return result
 
     try:
-        out = model.call(model.EMAIL_SYSTEM,
-                         f"From: {sender}\nSubject: {r_subject}\nDate: {msg.get('date', '')}\n\n{r_body[:EMAIL_LIMIT]}",
-                         model.EMAIL_SCHEMA)
+        out = model.call(
+            model.EMAIL_SYSTEM,
+            f"From: {sender}\nSubject: {r_subject}\nDate: {msg.get('date', '')}\n\n{r_body[:EMAIL_LIMIT]}",
+            model.EMAIL_SCHEMA,
+        )
         result["model_used"] = True
-        result["bucket"] = out.get("bucket") if out.get("bucket") in ("action", "reply", "event", "headsup", "skip") \
+        result["bucket"] = (
+            out.get("bucket")
+            if out.get("bucket")
+            in ("action", "reply", "event", "headsup", "skip")
             else _heuristic_bucket(sender, subject, body)
+        )
         result["sensitive"] = result["sensitive"] or bool(out.get("sensitive"))
         extra = _extras(out.get("extra_pii"), f"{subject}\n{body}")
         if extra:
             result["redacted_subject"] = _apply(subject, mapping_id, extra)
             result["redacted_body"] = _apply(body, mapping_id, extra)
         summary = out.get("summary") or ""
-        events = [{"title": e.get("title", ""), "when": e.get("when", ""), "location": e.get("location", "")}
-                  for e in out.get("events") or [] if isinstance(e, dict)]
-    except model.Preempted:
-        raise                      # cancelled for a user request: retry later, don't cache rules-only
-    except Exception:
+        events = [
+            {
+                "title": e.get("title", ""),
+                "when": e.get("when", ""),
+                "location": e.get("location", ""),
+            }
+            for e in out.get("events") or []
+            if isinstance(e, dict)
+        ]
+    except model.PreemptedError:
+        raise  # cancelled for a user request: retry later, don't cache rules-only
+    except Exception:  # noqa: BLE001  (any model failure: fall back to rules only)
         result["bucket"] = _heuristic_bucket(sender, subject, body)
-        summary = f"{subject}: {_first_sentence(body)}" if subject else _first_sentence(body)
+        summary = (
+            f"{subject}: {_first_sentence(body)}"
+            if subject
+            else _first_sentence(body)
+        )
         events = []
 
     # Final guarantee: no known PII value survives in summary/events (re-redact with the mapping).
     result["summary"] = _apply(summary, mapping_id)
-    result["events"] = [{k: _apply(v, mapping_id) for k, v in e.items()} for e in events]
+    result["events"] = [
+        {k: _apply(v, mapping_id) for k, v in e.items()} for e in events
+    ]
     return result
 
 
@@ -157,33 +224,65 @@ def filter_page(page: dict) -> dict:
     mapping_id = store.new_id()
     r_title = _apply(title, mapping_id)
     r_text = _apply(text, mapping_id)
-    sensitive = patterns.title_sensitive(title) or patterns.keywords_sensitive(f"{title}\n{text[:5000]}") or any(
-        k in ("SSN", "CARD", "PASSPORT", "ACCOUNT") for k, _ in patterns.find_pii(text))
+    sensitive = (
+        patterns.title_sensitive(title)
+        or patterns.keywords_sensitive(f"{title}\n{text[:5000]}")
+        or any(
+            k in ("SSN", "CARD", "PASSPORT", "ACCOUNT")
+            for k, _ in patterns.find_pii(text)
+        )
+    )
 
-    headings = [l.strip() for l in r_text.splitlines() if re.match(r"^\s*#{1,3}\s", l)]
+    headings = [
+        line.strip()
+        for line in r_text.splitlines()
+        if re.match(r"^\s*#{1,3}\s", line)
+    ]
     gist, model_used = "", False
     try:
-        parts = (_chunks(r_text, BG_PAGE_CHUNK, BG_PAGE_MAX_CHUNKS) if model.in_background()
-                 else [r_text[:PAGE_CHUNK]])
+        parts = (
+            _chunks(r_text, BG_PAGE_CHUNK, BG_PAGE_MAX_CHUNKS)
+            if model.in_background()
+            else [r_text[:PAGE_CHUNK]]
+        )
         for i, part in enumerate(parts):
-            head = f"Title: {r_title}" + (f" (part {i + 1} of {len(parts)})" if len(parts) > 1 else "")
-            out = model.call(model.PAGE_SYSTEM, f"{head}\n\n{part}", model.PAGE_SCHEMA)
+            head = f"Title: {r_title}" + (
+                f" (part {i + 1} of {len(parts)})" if len(parts) > 1 else ""
+            )
+            out = model.call(
+                model.PAGE_SYSTEM, f"{head}\n\n{part}", model.PAGE_SCHEMA
+            )
             sensitive = sensitive or bool(out.get("sensitive"))
             # Keep discoveries from completed chunks even if a later model call fails.
             extra = _extras(out.get("extra_pii"), f"{title}\n{text}")
             if extra:
                 r_title = _apply(title, mapping_id, extra)
                 r_text = _apply(text, mapping_id, extra)
-                headings = [l.strip() for l in r_text.splitlines() if re.match(r"^\s*#{1,3}\s", l)]
+                headings = [
+                    line.strip()
+                    for line in r_text.splitlines()
+                    if re.match(r"^\s*#{1,3}\s", line)
+                ]
             if i == 0:
                 gist = out.get("gist") or ""
         model_used = True
-    except model.Preempted:
-        raise                      # cancelled for a user request: retry later, don't cache rules-only
-    except Exception:
-        body_lines = [l for l in r_text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    except model.PreemptedError:
+        raise  # cancelled for a user request: retry later, don't cache rules-only
+    except Exception:  # noqa: BLE001  (any model failure: fall back to rules only)
+        body_lines = [
+            line
+            for line in r_text.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
         gist = _first_sentence(" ".join(body_lines[:5]))
 
-    outline = "\n".join([f"# {r_title}", f"Gist: {_apply(gist, mapping_id)}"] + headings)
-    return {"sensitive": sensitive, "outline": outline, "redacted_text": r_text,
-            "mapping_id": mapping_id, "model_used": model_used}
+    outline = "\n".join(
+        [f"# {r_title}", f"Gist: {_apply(gist, mapping_id)}", *headings]
+    )
+    return {
+        "sensitive": sensitive,
+        "outline": outline,
+        "redacted_text": r_text,
+        "mapping_id": mapping_id,
+        "model_used": model_used,
+    }

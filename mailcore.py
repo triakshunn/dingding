@@ -1,4 +1,9 @@
-"""Shared helpers: settings (data/config.json), timezone, Gmail query, and email body extraction."""
+"""Shared mail settings and helpers for the broker.
+
+Holds the user's config (timezone, Gmail query) and turns Gmail message
+payloads into plain text. Imported by the broker backend and actions.
+"""
+
 import base64
 import html
 import json
@@ -10,53 +15,86 @@ from auth import DATA
 
 CONFIG = json.loads((DATA / "config.json").read_text())
 TZ = ZoneInfo(CONFIG["timezone"])
-# Which mail counts as "new" for briefs. Promotions/social/forums tabs are skipped (use `ia cleanup` for those).
-GMAIL_QUERY = CONFIG.get("gmail_query", "newer_than:2d -category:promotions -category:social -category:forums -in:chats")
+# Skip promotions/social/forums: they almost never hold real events, and every
+# email costs a local-model call.
+GMAIL_QUERY = CONFIG.get(
+    "gmail_query",
+    "newer_than:2d -category:promotions -category:social -category:forums"
+    " -in:chats",
+)
 MAX_BODY_CHARS = 3000
 
+# Marketing mail pads previews with invisible characters; they only waste
+# model tokens.
+_INVISIBLE = re.compile(
+    "[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f"
+    "\u202a-\u202e\u2060-\u206f\u3164\ufeff\uffa0]"
+)
+_SPACES = re.compile("[ \t\r\u00a0\u2007\u202f]+")
+_BLANK_LINES = re.compile(r"\n\s*\n+")
+_SKIP_TAGS = ("style", "script")
+_BREAK_TAGS = ("br", "p", "div", "tr", "li")
 
-class _Text(HTMLParser):
+
+class _TextExtractor(HTMLParser):
+    """HTML parser that keeps visible text and turns blocks into newlines."""
+
     def __init__(self):
         super().__init__()
-        self.parts, self._skip = [], 0
+        self.parts = []
+        self._skip = 0
 
     def handle_starttag(self, tag, attrs):
-        if tag in ("style", "script"):
+        """Starts skipping style/script; adds a newline for block tags."""
+        del attrs  # Unused.
+        if tag in _SKIP_TAGS:
             self._skip += 1
-        elif tag in ("br", "p", "div", "tr", "li"):
+        elif tag in _BREAK_TAGS:
             self.parts.append("\n")
 
     def handle_endtag(self, tag):
-        if tag in ("style", "script"):
+        """Stops skipping after a style/script block."""
+        if tag in _SKIP_TAGS:
             self._skip -= 1
 
     def handle_data(self, data):
+        """Keeps text that is not inside style/script."""
         if not self._skip:
             self.parts.append(data)
 
 
-def html_to_text(s: str) -> str:
-    p = _Text()
-    p.feed(s)
-    return html.unescape("".join(p.parts))
+def html_to_text(markup: str) -> str:
+    """Returns the visible text of an HTML document."""
+    parser = _TextExtractor()
+    parser.feed(markup)
+    return html.unescape("".join(parser.parts))
 
 
 def body_text(payload: dict) -> str:
-    """Prefer text/plain, fall back to stripped HTML."""
+    """Extracts a message body as clean plain text.
+
+    Args:
+        payload: The `payload` of a Gmail API message (format=full).
+
+    Returns:
+        The text/plain part (or the text of the HTML part when there is none),
+        without invisible padding characters, at most MAX_BODY_CHARS long.
+    """
     found = {}
 
     def walk(part):
         mime = part.get("mimeType", "")
         data = part.get("body", {}).get("data")
         if data and mime in ("text/plain", "text/html") and mime not in found:
-            found[mime] = base64.urlsafe_b64decode(data).decode("utf-8", "replace")
-        for sub in part.get("parts", []) or []:
+            found[mime] = base64.urlsafe_b64decode(data).decode(
+                "utf-8", "replace"
+            )
+        for sub in part.get("parts") or []:
             walk(sub)
 
     walk(payload)
     text = found.get("text/plain") or html_to_text(found.get("text/html", ""))
-    # Marketing mail pads previews with invisible characters; drop them so they don't waste model tokens.
-    text = re.sub(r"[­͏؜ᅟᅠ឴឵᠎​-‏‪-‮⁠-⁯ㅤ﻿ﾠ]", "", text)
-    text = re.sub(r"[ \t\r   ]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
+    text = _INVISIBLE.sub("", text)
+    text = _SPACES.sub(" ", text)
+    text = _BLANK_LINES.sub("\n\n", text)
     return text.strip()[:MAX_BODY_CHARS]
