@@ -278,6 +278,18 @@ class RealBackend:
         """Lists calendar events for the next `days` days."""
         return actions.upcoming(days)
 
+    def cal_events(self, days):
+        """Lists suggestion-calendar events (with ids) for `days` days."""
+        return actions.events(days)
+
+    def cal_get(self, event_id):
+        """Returns one suggestion-calendar event."""
+        return actions.get_event(event_id)
+
+    def cal_update(self, event_id, body):
+        """Replaces one suggestion-calendar event."""
+        return actions.update_event(event_id, body)
+
     def notion_api(self, method, path, body=None, version=notion.VERSION):
         """Calls the Notion API with the host's integration key."""
         return _REAL_NOTION_API(method, path, body, version=version)

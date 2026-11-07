@@ -174,6 +174,7 @@ class FakeBackend:
             }
         }
         self.n = 0
+        self.events = {}  # suggestion calendar: id -> API event dict
 
     def accounts(self):
         return ["personal", "school"]
@@ -194,6 +195,18 @@ class FakeBackend:
             for (a, mid) in self.mails
             if a == acct and mid not in self.sent.get(acct, [])
         ][:mx]
+
+    def cal_events(self, days):
+        return [
+            {"id": k, "title": e["summary"]} for k, e in self.events.items()
+        ]
+
+    def cal_get(self, event_id):
+        return json.loads(json.dumps(self.events[event_id]))
+
+    def cal_update(self, event_id, body):
+        self.events[event_id] = json.loads(json.dumps(body))
+        return body
 
     def thread_meta(self, acct, mid):
         return self.threads.get((acct, mid))
@@ -1301,6 +1314,165 @@ class BrokerTests(unittest.TestCase):
                 server.trackers.Trackers(BROKER).now,
                 server.trackers.telegram,
             )
+
+    def test_24_flight_search_multi_leg(self):
+        tz = server.trackers.TZ
+        key = TMP / "serpapi_key"
+        key.write_text("FAKE_SERPAPI_KEY")
+        calls = []
+
+        def fake_serpapi(q):
+            calls.append(q)
+            price = 300 + 10 * len(calls)
+            seg = {
+                "airline": "Delta",
+                "flight_number": "DL 1",
+                "departure_airport": {
+                    "id": q["departure_id"].split(",")[0],
+                    "time": q["outbound_date"] + " 08:00",
+                },
+                "arrival_airport": {
+                    "id": q["arrival_id"].split(",")[-1],
+                    "time": q["outbound_date"] + " 11:00",
+                },
+                "extensions": ["Overhead bin access"],
+            }
+            return {
+                "best_flights": [
+                    {"price": price, "total_duration": 180, "flights": [seg]},
+                    {"price": price + 50, "flights": [seg]},
+                ],
+                "other_flights": [{"price": None, "flights": [seg]}],
+            }
+
+        tr = BROKER.tr
+        try:
+            tr.now = lambda: dt.datetime(2026, 11, 8, 9, 0, tzinfo=tz)
+            with (
+                patch.dict(os.environ, {"SERPAPI_KEY_FILE": str(key)}),
+                patch.object(server.trackers, "_serpapi", fake_serpapi),
+            ):
+                r = run(
+                    "ia",
+                    "flight-search",
+                    "--leg",
+                    "dtw",
+                    "MHT,BOS",
+                    "2026-12-20,2026-12-21",
+                    "--leg",
+                    "MHT,BOS",
+                    "SFO",
+                    "2026-12-25",
+                    "--leg",
+                    "SFO",
+                    "DTW",
+                    "2027-01-04,2027-01-05",
+                )
+                self.assertIn(
+                    "airport codes",
+                    run(
+                        "ia",
+                        "flight-search",
+                        "--leg",
+                        "Boston",
+                        "BOS",
+                        "2026-12-20",
+                        ok=False,
+                    ),
+                )
+                self.assertIn(
+                    "not in the past",
+                    run(
+                        "ia",
+                        "flight-search",
+                        "--leg",
+                        "DTW",
+                        "BOS",
+                        "2026-01-01",
+                        ok=False,
+                    ),
+                )
+            self.assertEqual(len(calls), 5)  # legs x dates
+            self.assertTrue(
+                all(q["bags"] == "1" and q["type"] == "2" for q in calls)
+            )  # carry-on, one way
+            self.assertEqual(calls[0]["departure_id"], "DTW")
+            self.assertEqual(r["searches_used"], 5)
+            first = r["legs"][0]
+            self.assertEqual(
+                (first["date"], len(first["options"])), ("2026-12-20", 2)
+            )  # priceless dropped
+            self.assertEqual(first["options"][0]["price"], 310)
+            self.assertIn(
+                "Overhead bin access", first["options"][0]["bag_notes"]
+            )
+            self.assertNotIn("FAKE_SERPAPI_KEY", json.dumps(r))
+        finally:
+            tr.now = server.trackers.Trackers(BROKER).now
+
+    def test_25_calendar_edit_and_undo(self):
+        BACKEND.events.clear()
+        BACKEND.events["ev1"] = {
+            "id": "ev1",
+            "summary": "Lunch with Sam",
+            "start": {"date": "2030-01-08"},
+            "end": {"date": "2030-01-09"},
+        }
+        BACKEND.events["ev2"] = {
+            "id": "ev2",
+            "summary": "Seminar",
+            "start": {"dateTime": "2030-01-09T16:00:00-05:00"},
+            "end": {"dateTime": "2030-01-09T17:30:00-05:00"},
+        }
+        self.assertEqual(
+            {e["id"] for e in run("ia", "cal-events")}, {"ev1", "ev2"}
+        )
+        # The user's case: an all-day entry becomes noon (1 h by default).
+        r = run("ia", "cal-edit", "ev1", "--start", "2030-01-08T12:00")
+        ev = BACKEND.events["ev1"]
+        self.assertEqual(ev["start"]["dateTime"][:16], "2030-01-08T12:00")
+        self.assertEqual(ev["end"]["dateTime"][:16], "2030-01-08T13:00")
+        self.assertNotIn("date", ev["start"])
+        self.assertEqual(r["before"]["start"], {"date": "2030-01-08"})
+        # Moving a timed event keeps its length; titles change in place.
+        run(
+            "ia",
+            "cal-edit",
+            "ev2",
+            "--start",
+            "2030-01-10T15:00",
+            "--title",
+            "Robotics seminar",
+        )
+        ev2 = BACKEND.events["ev2"]
+        self.assertEqual(ev2["end"]["dateTime"][:16], "2030-01-10T16:30")
+        self.assertEqual(ev2["summary"], "Robotics seminar")
+        # Back to all day, then refusals.
+        run("ia", "cal-edit", "ev2", "--all-day")
+        self.assertEqual(BACKEND.events["ev2"]["start"], {"date": "2030-01-10"})
+        self.assertIn(
+            "nothing to change", run("ia", "cal-edit", "ev1", ok=False)
+        )
+        self.assertIn(
+            "end must be after start",
+            run(
+                "ia",
+                "cal-edit",
+                "ev1",
+                "--start",
+                "2030-01-08T12:00",
+                "--end",
+                "2030-01-08T11:00",
+                ok=False,
+            ),
+        )
+        # Undo restores the previous version, newest first.
+        run("ia", "cal-undo")
+        self.assertIn("dateTime", BACKEND.events["ev2"]["start"])
+        run("ia", "cal-undo")
+        run("ia", "cal-undo")
+        self.assertEqual(BACKEND.events["ev1"]["start"], {"date": "2030-01-08"})
+        self.assertIn("nothing to undo", run("ia", "cal-undo", ok=False))
 
     def test_99_no_secrets_leaked(self):
         blob = "\n".join(OUTPUTS)

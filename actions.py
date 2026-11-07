@@ -123,6 +123,62 @@ def upcoming(days):
     return "\n".join(out)
 
 
+def events(days):
+    """Returns events from today's midnight through `days` days ahead.
+
+    Only the suggestions calendar (calendar_id) is read.
+
+    Returns:
+        [{"id", "title", "start", "end", "all_day", "location"}, ...] with
+        start/end as ISO dates (all-day) or datetimes.
+    """
+    start = dt.datetime.combine(dt.datetime.now(TZ).date(), dt.time(), TZ)
+    items = (
+        calendar()
+        .events()
+        .list(
+            calendarId=calendar_id(),
+            timeMin=start.isoformat(),
+            timeMax=(start + dt.timedelta(days=days)).isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+        .get("items", [])
+    )
+    return [
+        {
+            "id": e["id"],
+            "title": e.get("summary", ""),
+            "start": e["start"].get("dateTime") or e["start"].get("date"),
+            "end": e["end"].get("dateTime") or e["end"].get("date"),
+            "all_day": "date" in e["start"],
+            "location": e.get("location", ""),
+        }
+        for e in items
+    ]
+
+
+def get_event(event_id):
+    """Returns one event of the suggestions calendar (raw API dict)."""
+    return (
+        calendar()
+        .events()
+        .get(calendarId=calendar_id(), eventId=event_id)
+        .execute()
+    )
+
+
+def update_event(event_id, body):
+    """Replaces one event of the suggestions calendar with `body`."""
+    return (
+        calendar()
+        .events()
+        .update(calendarId=calendar_id(), eventId=event_id, body=body)
+        .execute()
+    )
+
+
 # ---------- drafts (never sent: the user taps Send in Gmail) ----------
 
 

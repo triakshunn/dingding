@@ -8,6 +8,9 @@ privacy broker on the laptop, which filters what you can read. You cannot send e
   ia suggest-event --title T --start ISO [--end ISO | --all-day] [--location L] [--source account:id]
   ia suggest-reply --source account:id [--why "..."]
   ia pending | ia dismiss N… | ia cal-add N… | ia cal-add-new --title … --start … | ia cal-list [--days 7]
+  ia cal-events [--days 14]                      calendar events WITH ids (for cal-edit)
+  ia cal-edit ID [--title T] [--start ISO] [--end ISO] [--all-day] [--location L]   (only when asked; undoable)
+  ia cal-undo [change_id]                        undo the last calendar edit
   ia draft N --body "<text>"
   ia recent [--bucket skip|headsup|event|action|reply|private]     emails shown in recent checks/briefs
   ia archive <ref|N>… [--bucket B|all [--batch 1]] [--confirmed] [--keep-unread]   (Inbox label only; undoable)
@@ -18,6 +21,8 @@ privacy broker on the laptop, which filters what you can read. You cannot send e
   ia cleanup --confirm <plan_id>    → carry out exactly that preview (after the user's yes)
   ia track [bills|waiting|flights|watches]       trackers (bills & subscriptions, waiting for a reply, flights, price watches)
   ia track dismiss ID…                            hide tracker items that don't matter
+  ia flight-search --leg FROM TO DATES [--leg ...] [--no-carry-on]   live fares now (Google Flights)
+      FROM/TO: IATA codes, alternatives with commas (MHT,BOS); DATES: YYYY-MM-DD[,YYYY-MM-DD...]
   ia flight-watch add FROM TO YYYY-MM-DD [--return YYYY-MM-DD] [--max-price N] · list · rm ID
   ia mail-log                        recent archive/cleanup batches  ·  ia undo-mail [batch_id]  undo one
 """
@@ -51,6 +56,10 @@ def main():
     p = sp.add_parser("dismiss"); p.add_argument("n", nargs="+", type=int)
     p = sp.add_parser("cal-add"); p.add_argument("n", nargs="+", type=int)
     p = sp.add_parser("cal-list"); p.add_argument("--days", type=int, default=7)
+    p = sp.add_parser("cal-events"); p.add_argument("--days", type=int, default=14)
+    p = sp.add_parser("cal-edit"); p.add_argument("id"); p.add_argument("--title"); p.add_argument("--start")
+    p.add_argument("--end"); p.add_argument("--all-day", action="store_true"); p.add_argument("--location")
+    p = sp.add_parser("cal-undo"); p.add_argument("change_id", nargs="?")
     p = sp.add_parser("draft"); p.add_argument("n", type=int); p.add_argument("--body", required=True)
     p = sp.add_parser("recent"); p.add_argument("--bucket")
     p = sp.add_parser("archive"); p.add_argument("targets", nargs="*")
@@ -64,6 +73,9 @@ def main():
     sp.add_parser("mail-log")
     p = sp.add_parser("track"); p.add_argument("what", nargs="?", choices=["bills", "waiting", "flights", "watches", "dismiss"])
     p.add_argument("ids", nargs="*")
+    p = sp.add_parser("flight-search")
+    p.add_argument("--leg", nargs=3, action="append", required=True, metavar=("FROM", "TO", "DATES"))
+    p.add_argument("--no-carry-on", action="store_true")
     p = sp.add_parser("flight-watch"); p.add_argument("action", choices=["add", "list", "rm"]); p.add_argument("args", nargs="*")
     p.add_argument("--return", dest="ret"); p.add_argument("--max-price", type=float)
     a = ap.parse_args()
@@ -106,6 +118,13 @@ def main():
         else:
             out(call("mail.cleanup", areas=a.area, older_than_days=a.older_than, action=a.action,
                      accounts=a.account or None))
+    elif a.cmd == "cal-events":
+        out(call("cal.events", days=a.days))
+    elif a.cmd == "cal-edit":
+        out(call("cal.edit", id=a.id, title=a.title, start=a.start, end=a.end, all_day=a.all_day,
+                 location=a.location))
+    elif a.cmd == "cal-undo":
+        out(call("cal.undo", change_id=a.change_id))
     elif a.cmd == "brief":
         out(call("brief", kind=a.kind, peek=a.peek, max=a.max))
     elif a.cmd == "track":
@@ -113,6 +132,9 @@ def main():
             out(call("track.dismiss", ids=a.ids))
         else:
             out(call("track", what=a.what))
+    elif a.cmd == "flight-search":
+        legs = [{"from": f, "to": t, "dates": d.split(",")} for f, t, d in a.leg]
+        out(call("flight.search", legs=legs, carry_on=not a.no_carry_on))
     elif a.cmd == "flight-watch":
         if a.action == "add":
             if len(a.args) != 3:

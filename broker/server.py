@@ -229,6 +229,9 @@ class Broker:
             "dismiss": self.op_dismiss,
             "cal.add": self.op_cal_add,
             "cal.add-new": self.op_cal_add_new,
+            "cal.events": self.op_cal_events,
+            "cal.edit": self.op_cal_edit,
+            "cal.undo": self.op_cal_undo,
             "draft": self.op_draft,
             "notion.create": self.op_notion_create,
             "notion.append": self.op_notion_append,
@@ -257,6 +260,7 @@ class Broker:
                 "flight-watch.add": self._watch_add,
                 "flight-watch.list": lambda a: self.tr.watches(),
                 "flight-watch.rm": self._watch_rm,
+                "flight.search": self._flight_search,
             }
         )
 
@@ -1258,6 +1262,14 @@ class Broker:
         except ValueError as e:
             raise RefusedError(str(e)) from e
 
+    def _flight_search(self, a):
+        try:
+            return self.tr.search_flights(
+                a.get("legs") or [], carry_on=a.get("carry_on", True)
+            )
+        except ValueError as e:
+            raise RefusedError(str(e)) from e
+
     def _watch_rm(self, a):
         try:
             return self.tr.watch_rm(a.get("id"))
@@ -1299,6 +1311,140 @@ class Broker:
                 res.append(self.b.cal_add(item))
                 del data["items"][str(n)]
         return res
+
+    def op_cal_events(self, a):
+        """Lists suggestion-calendar events with ids (for cal-edit)."""
+        return self.b.cal_events(int(a.get("days", 14)))
+
+    def _cal_log(self):
+        p = self.cache / "cal_changes.json"
+        return json.loads(p.read_text()) if p.exists() else []
+
+    def _new_times(self, ev, a):
+        """Returns the event's new (start, end) API dicts for an edit.
+
+        A start with a time makes the event timed (keeping its length, or 1 h
+        when it was all-day); a date-only start or `all_day` makes it all-day.
+
+        Raises:
+            RefusedError: Unparseable time, or end before start.
+        """
+        old_s, old_e = ev["start"], ev["end"]
+        was_all_day = "date" in old_s
+        if was_all_day:
+            length = dt.timedelta(hours=1)
+        else:
+            length = dt.datetime.fromisoformat(
+                old_e["dateTime"]
+            ) - dt.datetime.fromisoformat(old_s["dateTime"])
+        start_s = a.get("start") or (old_s.get("dateTime") or old_s.get("date"))
+        all_day = a.get("all_day") or (
+            a.get("start") is not None and "T" not in a["start"]
+        )
+        if not a.get("start") and not a.get("all_day"):
+            all_day = was_all_day and not a.get("end", "").count("T")
+        if all_day:
+            day = self._parse_time(start_s[:10], "start").date()
+            end_day = (
+                self._parse_time(a["end"][:10], "end").date()
+                if a.get("end")
+                else day + dt.timedelta(days=1)
+            )
+            if end_day <= day:
+                raise RefusedError("end must be after start")
+            return {"date": day.isoformat()}, {"date": end_day.isoformat()}
+        start = self._parse_time(start_s, "start")
+        if "T" not in start_s:
+            start = start.replace(hour=12)  # an all-day event made timed
+        end = (
+            self._parse_time(a["end"], "end")
+            if a.get("end")
+            else start + length
+        )
+        if end <= start:
+            raise RefusedError("end must be after start")
+        zone = {"timeZone": TZ.key}
+        return (
+            {"dateTime": start.isoformat(), **zone},
+            {"dateTime": end.isoformat(), **zone},
+        )
+
+    def op_cal_edit(self, a):
+        """Edits one suggestion-calendar event (only when the user asked).
+
+        Snapshots the event first so `cal.undo` can restore it.
+
+        Args:
+            a: {"id": event id, "title"?, "start"?, "end"?, "all_day"?,
+                "location"?}; times ISO 8601 (date only = all day).
+
+        Returns:
+            The event before and after the edit, and the change id.
+
+        Raises:
+            RefusedError: No id, nothing to change, or bad times.
+        """
+        if not a.get("id"):
+            raise RefusedError("give the event id from `ia cal-events`")
+        changes = {
+            k
+            for k in ("title", "start", "end", "all_day", "location")
+            if a.get(k) not in (None, "", False)
+        }
+        if not changes:
+            raise RefusedError("nothing to change")
+        ev = self.b.cal_get(a["id"])
+        before = {k: ev.get(k) for k in ("summary", "location", "start", "end")}
+        new = dict(ev)
+        if changes & {"start", "end", "all_day"}:
+            new["start"], new["end"] = self._new_times(ev, a)
+        if a.get("title"):
+            new["summary"] = a["title"]
+        if a.get("location") is not None and "location" in changes:
+            new["location"] = a["location"]
+        self.b.cal_update(a["id"], new)
+        cid = f"e{dt.datetime.now(TZ):%Y%m%d-%H%M%S}"
+        with self._lock:
+            log = self._cal_log()
+            log.append(
+                {
+                    "id": cid,
+                    "event_id": a["id"],
+                    "before": before,
+                    "undone": False,
+                }
+            )
+            _write_private(self.cache / "cal_changes.json", log[-50:])
+        show = {k: new.get(k) for k in ("summary", "location", "start", "end")}
+        return {
+            "change_id": cid,
+            "before": before,
+            "after": show,
+            "note": "`ia cal-undo` restores the previous version.",
+        }
+
+    def op_cal_undo(self, a):
+        """Restores the event of the last (or given) calendar edit.
+
+        Raises:
+            RefusedError: Nothing to undo.
+        """
+        with self._lock:
+            log = self._cal_log()
+            todo = [
+                e
+                for e in log
+                if not e["undone"] and a.get("change_id") in (None, e["id"])
+            ]
+            if not todo:
+                raise RefusedError("nothing to undo")
+            e = todo[-1]
+            ev = self.b.cal_get(e["event_id"])
+            ev.update({k: v for k, v in e["before"].items() if v is not None})
+            self.b.cal_update(e["event_id"], ev)
+            e["undone"] = True
+            _write_private(self.cache / "cal_changes.json", log)
+        return {"undone": e["id"], "restored": e["before"]}
 
     def op_cal_add_new(self, a):
         """Adds an event the user dictated directly to the calendar."""

@@ -38,6 +38,8 @@ SERPAPI_MONTHLY_CAP = int(
     os.environ.get("SERPAPI_MONTHLY_CAP", "240")
 )  # free plan: 250 searches/month
 WATCH_EVERY_HOURS = 24
+MAX_SEARCHES_PER_REQUEST = 12  # one flight-search request (legs x dates)
+SEARCH_TOP = 3  # cheapest options shown per leg and date
 DROP_ALERT = 0.05  # alert when the lowest price beats the previous low by 5 %+
 
 CANDIDATE = re.compile(
@@ -254,6 +256,84 @@ def _public_watch(w):
         "latest": last,
         "lowest_seen": min(lows) if lows else None,
         "checks": len(w["history"]),
+    }
+
+
+def _serpapi(params):
+    """Calls SerpApi search; never logs the URL (it contains the key)."""
+    url = "https://serpapi.com/search.json?" + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=60) as r:
+        return json.loads(r.read())
+
+
+_AIRPORTS_RE = re.compile(r"[A-Z]{3}(,[A-Z]{3})*")
+
+
+def _check_leg(leg, today):
+    """Validates and normalises one flight-search leg.
+
+    Raises:
+        ValueError: Bad airport codes or dates.
+    """
+    frm = str(leg.get("from", "")).upper().replace(" ", "")
+    to = str(leg.get("to", "")).upper().replace(" ", "")
+    if not (_AIRPORTS_RE.fullmatch(frm) and _AIRPORTS_RE.fullmatch(to)):
+        raise ValueError("use 3-letter airport codes, e.g. DTW or MHT,BOS")
+    dates = list(dict.fromkeys(str(d) for d in leg.get("dates") or []))
+    if not dates or any(not _date(d) or _date(d) < today for d in dates):
+        raise ValueError("dates must be YYYY-MM-DD and not in the past")
+    return {"from": frm, "to": to, "dates": dates}
+
+
+def _option(o):
+    """Returns one Google Flights option in a compact form."""
+    segs = o.get("flights") or []
+    notes = [
+        e
+        for e in (o.get("extensions") or [])
+        + [x for seg in segs for x in seg.get("extensions") or []]
+        if re.search(r"bag|carry|overhead|personal item|fare", e, re.I)
+    ]
+    return {
+        "price": o.get("price"),
+        "airline": " + ".join(
+            dict.fromkeys(g.get("airline", "") for g in segs)
+        ),
+        "flights": [g.get("flight_number") for g in segs],
+        "from": (segs[0].get("departure_airport") or {}).get("id"),
+        "depart": (segs[0].get("departure_airport") or {}).get("time"),
+        "to": (segs[-1].get("arrival_airport") or {}).get("id"),
+        "arrive": (segs[-1].get("arrival_airport") or {}).get("time"),
+        "stops": max(0, len(segs) - 1),
+        "duration_min": o.get("total_duration"),
+        "bag_notes": list(dict.fromkeys(notes)),
+    }
+
+
+def _leg_result(leg, date, data, top):
+    """Summarises one SerpApi answer: the cheapest `top` options."""
+    options = [
+        o
+        for o in (data.get("best_flights") or [])
+        + (data.get("other_flights") or [])
+        if isinstance(o.get("price"), (int, float))
+    ]
+    options.sort(key=lambda o: o["price"])
+    unique = {}  # Google lists some flights under both best and other
+    for o in options:
+        legs = tuple(g.get("flight_number") for g in o.get("flights") or [])
+        unique.setdefault((legs, o["price"]), o)
+    options = list(unique.values())
+    query = f"flights from {leg['from']} to {leg['to']} on {date} one way"
+    return {
+        "from": leg["from"],
+        "to": leg["to"],
+        "date": date,
+        "options": [_option(o) for o in options[:top]],
+        "price_level": (data.get("price_insights") or {}).get("price_level"),
+        "error": data.get("error"),
+        "google_flights": "https://www.google.com/travel/flights?q="
+        + urllib.parse.quote(query),
     }
 
 
@@ -709,9 +789,66 @@ class Trackers:
         }
         if w.get("return"):
             q["return_date"] = w["return"]
-        url = "https://serpapi.com/search.json?" + urllib.parse.urlencode(q)
-        with urllib.request.urlopen(url, timeout=60) as r:
-            return json.loads(r.read())
+        return _serpapi(q)
+
+    def search_flights(self, legs, carry_on=True, top=SEARCH_TOP):
+        """Searches Google Flights now, one-way per leg and date (SerpApi).
+
+        Args:
+            legs: [{"from": "DTW", "to": "MHT,BOS", "dates": ["2026-12-20"]}],
+                IATA codes (comma-separated alternatives) and YYYY-MM-DD dates.
+            carry_on: Price fares including one overhead-bin carry-on bag.
+            top: Cheapest options to return per leg and date.
+
+        Returns:
+            {"legs": [...], "searches_used", "searches_left_this_month"}; each
+            leg/date lists its cheapest options with times, stops and bag notes.
+
+        Raises:
+            ValueError: Bad input, no SerpApi key, or not enough searches left.
+        """
+        legs = [_check_leg(leg, self.now().date()) for leg in legs]
+        needed = sum(len(leg["dates"]) for leg in legs)
+        if not legs or needed > MAX_SEARCHES_PER_REQUEST:
+            raise ValueError(
+                f"1-{MAX_SEARCHES_PER_REQUEST} searches per request "
+                f"(legs x dates); this needs {needed}"
+            )
+        key = self._serpapi_key()
+        if not key:
+            raise ValueError("no SerpApi key on the laptop yet")
+        month = self.now().strftime("%Y-%m")
+        used = self._load("serpapi_usage", {}).get(month, 0)
+        if used + needed > SERPAPI_MONTHLY_CAP:
+            raise ValueError(
+                f"only {SERPAPI_MONTHLY_CAP - used} flight searches left this "
+                "month"
+            )
+        results = []
+        for leg in legs:
+            for date in leg["dates"]:
+                self._spend()
+                q = {
+                    "engine": "google_flights",
+                    "departure_id": leg["from"],
+                    "arrival_id": leg["to"],
+                    "outbound_date": date,
+                    "type": "2",
+                    "currency": "USD",
+                    "hl": "en",
+                    "api_key": key,
+                }
+                if carry_on:
+                    q["bags"] = "1"
+                results.append(_leg_result(leg, date, _serpapi(q), top))
+        return {
+            "legs": results,
+            "carry_on_included": carry_on,
+            "searches_used": needed,
+            "searches_left_this_month": SERPAPI_MONTHLY_CAP - used - needed,
+            "note": "Prices from Google Flights, one-way per leg; book on the "
+            "airline or Google Flights site.",
+        }
 
     def check_prices(self):
         """Checks each due watch (about daily) and alerts on price drops.

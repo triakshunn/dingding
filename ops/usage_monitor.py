@@ -45,7 +45,7 @@ BREAKER = (
 CONTAINER = os.environ.get("WATCHDOG_CONTAINER", "openclaw")
 BREAKER_MINUTES = int(os.environ.get("USAGE_BREAKER_MINUTES", "60"))
 BREAKER_TOKENS = int(
-    os.environ.get("USAGE_BREAKER_TOKENS", "1500000")
+    os.environ.get("USAGE_BREAKER_TOKENS", "4000000")
 )  # all input (incl. cached) + output
 COUNTERS = (
     "input",
