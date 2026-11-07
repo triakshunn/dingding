@@ -9,6 +9,11 @@ A strong cloud model (ChatGPT through [OpenClaw](https://openclaw.ai)) does the 
 but it **never holds your keys and only sees filtered data**: a local model on your own machine decides
 what is sensitive and hides private values before anything leaves it.
 
+<p align="center">
+  <img src="demo/demo.gif" width="360" alt="Demo chat: a morning brief arrives, the user says 'add 1 4' and two events go on the calendar, 'reply 3 say tuesday 2pm works' leaves a draft in Gmail, and 'archive all of them' archives the brief's 18 emails after a yes.">
+  <br><sub>Reenacted with made-up emails · <a href="demo/demo.mp4">MP4</a> · <a href="demo/">how it's made</a></sub>
+</p>
+
 ```
 Telegram ──▶ OpenClaw + ChatGPT (Docker, no keys) ──unix socket──▶ privacy broker (host, holds all keys)
                                                                       │  ① rules (regex)   ② local LLM (Ollama)
