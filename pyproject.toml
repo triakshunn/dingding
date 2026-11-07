@@ -55,3 +55,13 @@ single-line-exclusions = ["typing", "collections.abc"]
 [tool.ruff.lint.pylint]
 max-statements = 60
 max-branches = 15
+
+[tool.coverage.run]
+source = ["."]
+omit = ["*/tests/*", ".venv/*", "demo/*"]
+relative_files = true
+parallel = true
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = false

@@ -19,3 +19,6 @@ pending.json
 # Runtime (Docker)
 docker/state/
 docker/broker-io/
+.coverage
+.coverage.*
+coverage.xml

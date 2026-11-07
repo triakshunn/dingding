@@ -4,6 +4,11 @@
 
 # dingding
 
+[![CI](https://github.com/triakshunn/dingding/actions/workflows/ci.yml/badge.svg)](https://github.com/triakshunn/dingding/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/triakshunn/dingding/branch/main/graph/badge.svg)](https://codecov.io/gh/triakshunn/dingding)
+[![CodeQL](https://github.com/triakshunn/dingding/actions/workflows/codeql.yml/badge.svg)](https://github.com/triakshunn/dingding/actions/workflows/codeql.yml)
+[![Code style: ruff (Google)](https://img.shields.io/badge/style-Google%20Python%20%2B%20ruff-blue)](https://google.github.io/styleguide/pyguide.html)
+
 A privacy-first personal assistant for **Gmail, Google Calendar and Notion**, chatted with over Telegram.
 A strong cloud model (ChatGPT through [OpenClaw](https://openclaw.ai)) does the thinking and writing,
 but it **never holds your keys and only sees filtered data**: a local model on your own machine decides
