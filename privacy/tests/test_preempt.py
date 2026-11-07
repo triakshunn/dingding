@@ -54,7 +54,7 @@ def ollama(monkeypatch):
         model, "OLLAMA", f"http://127.0.0.1:{srv.server_address[1]}/api/chat"
     )
     monkeypatch.setenv("PRIVACY_QUIET_SECONDS", "0")
-    monkeypatch.setattr(model._scheduler, "last_user", 0.0)
+    monkeypatch.setattr(model._scheduler, "last_user", float("-inf"))
     ARRIVALS.clear()
     yield
     srv.shutdown()
@@ -180,7 +180,7 @@ def test_background_connect_does_not_block_user(monkeypatch):
 
     monkeypatch.setattr(model, "_connect", connect)
     monkeypatch.setattr(model, "_exchange", lambda *args: {"ok": True})
-    monkeypatch.setattr(model._scheduler, "last_user", 0.0)
+    monkeypatch.setattr(model._scheduler, "last_user", float("-inf"))
     monkeypatch.setenv("PRIVACY_QUIET_SECONDS", "0")
     bg_box, user_box = {}, {}
     bg = threading.Thread(target=_background, args=("background", bg_box))
@@ -223,7 +223,7 @@ def test_cancelled_successful_response_is_discarded(monkeypatch):
 
     monkeypatch.setattr(model, "_connect", lambda: (Connection(), "/api/chat"))
     monkeypatch.setattr(model, "_exchange", exchange)
-    monkeypatch.setattr(model._scheduler, "last_user", 0.0)
+    monkeypatch.setattr(model._scheduler, "last_user", float("-inf"))
     monkeypatch.setenv("PRIVACY_QUIET_SECONDS", "0")
     box = {}
     bg = threading.Thread(target=_background, args=("background", box))
@@ -283,7 +283,7 @@ def test_user_arrival_during_background_connect_defers_exchange(monkeypatch):
     monkeypatch.setattr(
         model, "_exchange", lambda *args: exchanged.append(True)
     )
-    monkeypatch.setattr(model._scheduler, "last_user", 0.0)
+    monkeypatch.setattr(model._scheduler, "last_user", float("-inf"))
     monkeypatch.setenv("PRIVACY_QUIET_SECONDS", "120")
     box = {}
     bg = threading.Thread(target=_background, args=("background", box))
@@ -302,3 +302,16 @@ def test_user_arrival_during_background_connect_defers_exchange(monkeypatch):
 def test_default_quiet_period_is_two_minutes(monkeypatch):
     monkeypatch.delenv("PRIVACY_QUIET_SECONDS", raising=False)
     assert model.quiet_seconds() == 120
+
+
+def test_fresh_scheduler_does_not_wait_right_after_boot(monkeypatch):
+    # Regression: last_user started at 0.0, and monotonic time starts near zero
+    # at boot, so a just-booted machine (e.g. a CI runner) sat inside the quiet
+    # period although no user request had happened.
+    monkeypatch.setattr(model.time, "monotonic", lambda: 30.0)
+    monkeypatch.setenv("PRIVACY_QUIET_SECONDS", "120")
+    scheduler = model._Scheduler()
+    waiter = threading.Thread(target=scheduler.wait_for_background, daemon=True)
+    waiter.start()
+    waiter.join(1)
+    assert not waiter.is_alive()

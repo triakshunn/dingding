@@ -937,7 +937,7 @@ class BrokerTests(unittest.TestCase):
 
         with (
             patch.dict(os.environ, {"PRIVACY_QUIET_SECONDS": "0.2"}),
-            patch.object(privacy.model._scheduler, "last_user", 0.0),
+            patch.object(privacy.model._scheduler, "last_user", float("-inf")),
             patch.object(
                 privacy.model,
                 "_connect",

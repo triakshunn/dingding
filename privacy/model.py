@@ -177,7 +177,8 @@ class _Scheduler:
 
     Attributes:
         user_calls: User requests currently queued or running.
-        last_user: Monotonic time when the last user request finished.
+        last_user: Monotonic time when the last user request finished
+            (-inf before the first one).
         bg_conn: Connection of the background call in flight, if any.
         bg_cancelled: Whether a user request cancelled that call.
     """
@@ -185,7 +186,9 @@ class _Scheduler:
     def __init__(self):
         self._cv = threading.Condition()
         self.user_calls = 0
-        self.last_user = 0.0
+        # No user request yet. Not 0.0: monotonic time starts near zero at
+        # boot, which would put a fresh machine inside the quiet period.
+        self.last_user = float("-inf")
         self.bg_conn = None
         self.bg_cancelled = False
 
