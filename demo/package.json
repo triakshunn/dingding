@@ -1,0 +1,12 @@
+{
+  "name": "dingding-demo",
+  "private": true,
+  "type": "module",
+  "description": "Renders the README demo GIF/MP4 from chat.html (made-up data).",
+  "scripts": {
+    "record": "node record.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.48.2"
+  }
+}
