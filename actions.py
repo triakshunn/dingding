@@ -1,4 +1,9 @@
-"""Things the bot does when you tell it to: add to calendar, draft a reply, send a draft."""
+"""Calendar and Gmail-draft actions the broker carries out for the agent.
+
+Adds suggested events to the user's calendar (deduplicated), lists upcoming
+events, and creates or deletes Gmail drafts. Nothing here sends email: the user
+taps Send in Gmail.
+"""
 
 import base64
 import contextlib
@@ -15,14 +20,29 @@ from mailcore import TZ
 
 
 def calendar():
+    """Returns a Calendar API client for the configured calendar account."""
     return build("calendar", "v3", credentials=load(CONFIG["calendar_account"]))
 
 
 def calendar_id():
+    """Returns the id of the calendar that suggestions are added to."""
     return CONFIG.get("add_to_calendar_id", CONFIG["calendar_id"])
 
 
 def add_event(item) -> str:
+    """Adds a pending event suggestion to the calendar, at most once.
+
+    Events are keyed by title and start date in a private extended property, so
+    adding the same suggestion twice is a no-op.
+
+    Args:
+        item: A pending "event" item (title, start, has_time, minutes, location,
+            ...).
+
+    Returns:
+        A short message for the agent, e.g. that the event was added or was
+            already on the calendar.
+    """
     cal = calendar()
     start = dt.datetime.fromisoformat(item["start"])
     key = hashlib.sha1(
@@ -60,6 +80,15 @@ def add_event(item) -> str:
 
 
 def upcoming(days):
+    """Lists calendar events from today's midnight through `days` days ahead.
+
+    Args:
+        days: How many days to look ahead.
+
+    Returns:
+        One line per event ("• <when> — <title> @ <location>"), or an empty
+        string if nothing is scheduled.
+    """
     start = dt.datetime.combine(dt.datetime.now(TZ).date(), dt.time(), TZ)
     items = (
         calendar()
@@ -114,7 +143,18 @@ def _raw(item, body):
 
 
 def save_draft(item, body):
-    """Create or update the Gmail draft (in the account the email came to). Returns draft id."""
+    """Creates or updates the reply draft in the account the email came to.
+
+    If the draft was deleted in Gmail meanwhile, a new one is created.
+
+    Args:
+        item: A pending "reply" item (acct, to, subject, thread_id, message ids,
+            draft_id).
+        body: The reply text, with placeholders already filled in.
+
+    Returns:
+        The Gmail draft id.
+    """
     drafts = (
         build("gmail", "v1", credentials=load(item["acct"])).users().drafts()
     )
@@ -130,6 +170,7 @@ def save_draft(item, body):
 
 
 def delete_draft(item):
+    """Deletes the item's Gmail draft, if it has one and it still exists."""
     if item.get("draft_id"):
         with contextlib.suppress(HttpError):  # Already deleted in Gmail.
             build(

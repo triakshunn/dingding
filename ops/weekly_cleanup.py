@@ -1,11 +1,14 @@
-"""Sunday mail cleanup: runs on the laptop (not the AI), for all three accounts, then reports on Telegram.
+"""Sunday mail cleanup, run on the host (not by the AI), then a Telegram report.
 
   Spam                     -> Trash (any age)
-  Promotions, Social tabs  -> Trash if older than 7 days (never starred / important; Primary inbox untouched)
+  Promotions, Social tabs  -> Trash if older than 7 days
+                              (never starred/important; Primary untouched)
 
-Trash is recoverable for 30 days. Undo from Telegram: "undo the Sunday cleanup" (ia mail-log / ia undo-mail).
-  python weekly_cleanup.py            # run + report
-  python weekly_cleanup.py --dry-run  # preview only, nothing changes, nothing sent
+Trash is recoverable for 30 days. Undo from Telegram: "undo the Sunday cleanup"
+(ia mail-log / ia undo-mail).
+
+    python weekly_cleanup.py            # run + report
+    python weekly_cleanup.py --dry-run  # preview only; nothing changes
 """
 
 import argparse
@@ -26,7 +29,8 @@ RULES = [  # (areas, older_than_days)
     (["spam"], 0),
     (["promotions", "social"], 7),
 ]
-MAX_ROUNDS = 3  # 2,000 emails per round -> up to 6,000 per rule (first run may have a backlog)
+# 2,000 emails per round -> up to 6,000 per rule (first run may have a backlog)
+MAX_ROUNDS = 3
 
 
 def _run_rule(areas, days, *, dry_run, totals, batches, problems):

@@ -1,5 +1,8 @@
-"""Preemption: a user model call cancels the in-flight background call; background waits for user calls.
-Uses a fake Ollama (threaded HTTP server). Run: uv run --with pytest pytest -q privacy/tests"""
+"""Tests for preemption: user model calls go before background calls.
+
+Uses a fake Ollama (threaded HTTP server). Run: uv run --with pytest pytest -q
+privacy/tests
+"""
 
 import json
 import threading

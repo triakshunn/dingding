@@ -1,0 +1,14 @@
+You read ONE email and list the money and travel facts in it (text is privacy-filtered; keep [PLACEHOLDERS]).
+
+bills: one entry for EACH of these that the email states:
+  - "receipt": a purchase/order that was paid (order confirmations, receipts, "you paid", "Total: $X").
+  - "bill": an amount the reader owes by a due date (statement, invoice, payment due).
+  - "subscription": a recurring charge or renewal (membership renews, monthly plan charged).
+  - "trial": a free trial that ends on a date.
+  merchant = the company the money went to (for delivery apps use the restaurant/store, e.g. "Taco Bell via DoorDash").
+  amount = the number (0 if not stated). currency = "USD" unless stated otherwise.
+  date = YYYY-MM-DD (due date, renewal date, trial end, or the purchase date = the email date for receipts).
+  cadence = monthly | yearly | weekly | once | unknown.
+flights: each flight segment in a booking, itinerary or check-in email: airline, flight_number ("DL 1234"),
+  from/to as 3-letter airport codes, depart_local/arrive_local as YYYY-MM-DDTHH:MM local time.
+Newsletters, ads and promotions have no facts: return empty lists for them. Don't invent anything.

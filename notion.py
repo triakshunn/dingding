@@ -30,6 +30,21 @@ LOG = DATA / "notion_changes.jsonl"
 
 
 def api(method, path, body=None, version=VERSION):
+    """Calls the Notion API and returns the JSON answer.
+
+    Retries rate limits and server errors (up to 5 attempts, honouring
+    Retry-After).
+
+    Args:
+        method: HTTP method.
+        path: API path, e.g. "/pages/<id>".
+        body: JSON body, if any.
+        version: Notion-Version header.
+
+    Raises:
+        SystemExit: With a readable message on other API errors; the broker
+            reports it to the agent.
+    """
     tok = TOKEN_FILE.read_text().strip()
     for attempt in range(5):
         req = urllib.request.Request(
@@ -57,6 +72,7 @@ def api(method, path, body=None, version=VERSION):
 
 
 def paged(method, path, body=None):
+    """Returns all results of a paginated Notion endpoint (GET or POST)."""
     out, cur = [], None
     while True:
         if method == "GET":
@@ -85,10 +101,12 @@ def paged(method, path, body=None):
 
 
 def plain(rich):
+    """Returns the plain text of a Notion rich-text array."""
     return "".join(t.get("plain_text", "") for t in rich or [])
 
 
 def title_of(obj):
+    """Returns the title of a page or database, or "(untitled)"."""
     if obj["object"] in ("database", "data_source"):
         return plain(obj.get("title")) or "(untitled)"
     for p in obj.get("properties", {}).values():
@@ -130,7 +148,10 @@ def prop_value(p):
 
 
 def rt(text):
-    """Plain text -> Notion rich_text (2000-char chunks, **bold** and `code` supported)."""
+    """Converts text to Notion rich text, with **bold** and `code` spans.
+
+    Long text is split into 2,000-character pieces (Notion's limit).
+    """
     out = []
     for chunk in re.split(r"(\*\*[^*]+\*\*|`[^`]+`)", text):
         if not chunk:
@@ -152,6 +173,7 @@ def rt(text):
 
 
 def md_to_blocks(md):
+    """Converts simple Markdown (headings, lists, quotes, code) to blocks."""
     blocks, code = [], None
     for line in md.splitlines():
         if line.startswith("```"):
@@ -233,6 +255,7 @@ def md_to_blocks(md):
 
 
 def blocks_to_text(block_id, depth, indent=0):
+    """Returns a block's children as text lines, recursing `depth` levels."""
     lines = []
     for b in paged("GET", f"/blocks/{block_id}/children?page_size=100"):
         t = b["type"]
@@ -287,6 +310,14 @@ def blocks_to_text(block_id, depth, indent=0):
 
 
 def log_change(kind, target, before, after_ref=None):
+    """Appends a change to the local Notion change log; returns its id.
+
+    Args:
+        kind: What happened (create, append, set, move, archive, undo).
+        target: The page id.
+        before: Snapshot needed to undo the change.
+        after_ref: Extra data for undo (e.g. ids of appended blocks).
+    """
     cid = uuid.uuid4().hex[:8]
     entry = {
         "id": cid,
@@ -302,6 +333,7 @@ def log_change(kind, target, before, after_ref=None):
 
 
 def read_log():
+    """Returns all logged Notion changes, oldest first."""
     return (
         [json.loads(line) for line in LOG.read_text().splitlines()]
         if LOG.exists()

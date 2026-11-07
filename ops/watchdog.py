@@ -1,11 +1,13 @@
-"""Watchdog — runs on the laptop every 10 minutes and messages you on Telegram if something breaks.
+"""Watchdog: runs on the host every 10 minutes and alerts on Telegram.
 
-Checks: OpenClaw container healthy · privacy broker socket answers · Ollama answers · disk > 10% free ·
-scheduled briefs ran OK · nightly Notion backup ran in the last 30 h.
-One alert per problem per 6 hours, plus a one-time "recovered" note. Never sends email, never prints the bot token.
+Checks that the OpenClaw container is healthy, the privacy broker answers,
+Ollama answers, the disk has more than 10% free, the scheduled briefs ran, and
+the nightly Notion backup ran within 30 hours. One alert per problem per 6
+hours, plus a one-time "recovered" note. Never sends email and never prints the
+bot token.
 
-  python watchdog.py            # check and alert
-  python watchdog.py --dry-run  # check and print what it WOULD send
+    python watchdog.py            # check and alert
+    python watchdog.py --dry-run  # check and print what it would send
 """
 
 import argparse
@@ -38,13 +40,15 @@ RECHECK_SECONDS = 30
 
 
 def run(cmd, timeout=60):
+    """Runs a command; returns (returncode, stdout, stderr) without raising."""
     p = subprocess.run(
         cmd, capture_output=True, text=True, timeout=timeout, check=False
     )
     return p.returncode, p.stdout, p.stderr
 
 
-# ---------- checks: each returns None (ok) or a short problem description ----------
+# ---------- checks: each returns None (ok) or a short problem description
+# ----------
 
 BREAKER = (
     Path(__file__).resolve().parents[1] / "data/usage/breaker.json"
@@ -52,14 +56,23 @@ BREAKER = (
 
 
 def check_container():
+    """Returns a problem if the OpenClaw container isn't healthy.
+
+    Skipped while the usage breaker (or --pause) keeps OpenClaw stopped.
+    """
     if BREAKER.exists():
-        return None  # deliberately stopped (usage breaker or --pause); resume with usage_monitor.py --resume
+        # deliberately stopped (usage breaker or --pause); resume with
+        # usage_monitor.py --resume
+        return None
     rc, out, _ = run(
         [
             "docker",
             "inspect",
             "--format",
-            "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}",
+            (
+                "{{.State.Status}} {{if"
+                " .State.Health}}{{.State.Health.Status}}{{end}}"
+            ),
             CONTAINER,
         ]
     )
@@ -74,12 +87,13 @@ def check_container():
 
 
 def check_broker():
+    """Returns a problem if the privacy broker doesn't answer."""
     if not SOCK.exists():
         return "Privacy broker isn't running (no socket)"
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(
-        300
-    )  # the broker answers through its queue; it may be busy with the local model for a while
+    # The broker answers through its queue; it may be busy with the local
+    # model for a while.
+    s.settimeout(300)
     try:
         s.connect(str(SOCK))
         s.sendall(b'{"op": "accounts", "args": {}}\n')
@@ -104,6 +118,7 @@ def check_broker():
 
 
 def check_ollama():
+    """Returns a problem if Ollama doesn't answer."""
     try:
         with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=20) as r:
             json.load(r)
@@ -113,6 +128,7 @@ def check_ollama():
 
 
 def check_disk():
+    """Returns a problem if the disk is almost full."""
     u = shutil.disk_usage(HOME)
     free = u.free / u.total
     return (
@@ -121,6 +137,10 @@ def check_disk():
 
 
 def check_briefs():
+    """Returns a problem if a scheduled brief failed or is overdue.
+
+    Skipped while OpenClaw is deliberately stopped.
+    """
     if BREAKER.exists():
         return None  # OpenClaw deliberately stopped: no briefs expected
     rc, out, _err = run(
@@ -158,6 +178,7 @@ def check_briefs():
 
 
 def check_backup():
+    """Returns a problem if the Notion backup is missing or stale."""
     if not BACKUPS.exists():
         return "No Notion backups found"
     days = [d for d in BACKUPS.iterdir() if d.is_dir() and any(d.iterdir())]
@@ -201,19 +222,22 @@ def chat_id():
 
 
 def bot_token():
+    """Returns the Telegram bot token from OpenClaw's config (never printed)."""
     return json.loads(OPENCLAW_CONFIG.read_text())["channels"]["telegram"][
         "botToken"
     ]
 
 
 def send(text, dry):
+    """Sends a Telegram message to the owner (only prints it when `dry`)."""
     if dry:
         print("[dry-run] would send:", text)
         return
     owner = chat_id()
     if not owner:
         print(
-            "No Telegram chat id (TELEGRAM_CHAT_ID / ownerAllowFrom); not sending:",
+            "No Telegram chat id (TELEGRAM_CHAT_ID / ownerAllowFrom); not"
+            " sending:",
             text,
         )
         return
@@ -228,6 +252,7 @@ def send(text, dry):
 
 
 def main():
+    """Runs the checks, alerts on new problems and recoveries, saves state."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument(
@@ -248,9 +273,8 @@ def main():
 
     for name in names:
         problem = check(name)
-        if (
-            problem and not a.dry_run
-        ):  # ride out planned restarts: confirm once more before alerting
+        # Ride out planned restarts: confirm once more before alerting.
+        if problem and not a.dry_run:
             time.sleep(RECHECK_SECONDS)
             problem = check(name)
         prev = state.get(name, {})

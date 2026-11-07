@@ -12,16 +12,21 @@ EMAIL_LIMIT = 2000
 PAGE_CHUNK = (
     3000  # on-demand (user waiting): one model call over the start of the page
 )
-BG_PAGE_CHUNK = 1200  # background: small calls so a user request never waits long for the model
+# background: small calls so a user request never waits long for the model
+BG_PAGE_CHUNK = 1200
 BG_PAGE_MAX_CHUNKS = 5  # background covers up to ~6,000 characters per page
 
 
-# Model-suggested extra strings to hide: shorter ones are noise, longer ones are prose.
+# Model-suggested extra strings to hide: shorter ones are noise, longer ones are
+# prose.
 _EXTRA_MIN_LEN, _EXTRA_MAX_LEN = 4, 80
 
 
 def _chunks(text: str, size: int, limit: int) -> list[str]:
-    """Split on line breaks into pieces of about `size` characters (at most `limit` pieces)."""
+    """Splits text on line breaks into pieces of about `size` characters.
+
+    Returns at most `limit` pieces; lines longer than `size` are hard-split.
+    """
     out, cur = [], ""
     for raw_line in text.splitlines(keepends=True):
         line = raw_line
@@ -51,7 +56,11 @@ def _replace_value(text: str, value: str, ph: str) -> str:
 def _apply(
     text: str, mapping_id: str, extra: list[tuple[str, str]] = ()
 ) -> str:
-    """Redact regex hits + extra (kind, value) pairs + every value already known to the mapping."""
+    """Redacts text with the mapping's placeholders.
+
+    Hides regex hits, the given extra (kind, value) pairs and every value the
+    mapping already knows, longest values first.
+    """
     if not text:
         return text or ""
     m = store.load(mapping_id)
@@ -66,7 +75,7 @@ def _apply(
 
 
 def locked_placeholders(text: str) -> list[str]:
-    """Placeholders present in text, in order of first appearance (e.g. ["[ACCOUNT_1]", "[PHONE_1]"])."""
+    """Returns the placeholders in text, in order of first appearance."""
     seen = []
     for ph in PLACEHOLDER_RE.findall(text or ""):
         if ph not in seen:
@@ -77,8 +86,17 @@ def locked_placeholders(text: str) -> list[str]:
 def check_edit_preserves(
     original_redacted: str, new_redacted: str
 ) -> tuple[bool, list[str]]:
-    """An edit by the cloud model must keep every hidden value: each placeholder in the original must still appear
-    (at least as many times) in the edited text. Returns (ok, missing_placeholders).
+    """Checks that an edit keeps every hidden value.
+
+    Each placeholder in the original must appear in the edited text at least as
+    many times, so the cloud model can't erase hidden values.
+
+    Args:
+        original_redacted: The redacted text the agent was shown.
+        new_redacted: The agent's edited text.
+
+    Returns:
+        (ok, missing_placeholders).
     """
     new = new_redacted or ""
     missing = [
@@ -90,11 +108,22 @@ def check_edit_preserves(
 
 
 def redact(text: str, mapping_id: str | None = None) -> tuple[str, str]:
+    """Redacts text and returns (redacted_text, mapping_id).
+
+    Args:
+        text: Text that may contain private values.
+        mapping_id: Mapping to reuse (so known values get the same
+            placeholders); a new one is created if omitted.
+    """
     mapping_id = mapping_id or store.new_id()
     return _apply(text, mapping_id), mapping_id
 
 
 def rehydrate(text: str, mapping_id: str) -> str:
+    """Puts the real values back in place of the mapping's placeholders.
+
+    Unknown placeholders are left as they are.
+    """
     m = store.load(mapping_id)
     return PLACEHOLDER_RE.sub(
         lambda x: m["values"].get(x.group(0), x.group(0)), text or ""
@@ -141,6 +170,24 @@ def _first_sentence(text: str, limit: int = 160) -> str:
 
 
 def filter_email(msg: dict) -> dict:
+    """Filters one email before anything about it leaves the host.
+
+    Security-code emails are dropped without reaching the model. Otherwise regex
+    rules redact private values, the local model buckets and summarizes the
+    redacted text and names extra values to hide, and the summary is redacted
+    again. If the model fails, rules-only results are returned.
+
+    Args:
+        msg: The email (from, subject, date, body).
+
+    Returns:
+        A dict with drop, sensitive, bucket, summary, events, redacted_subject,
+            redacted_body, mapping_id and model_used.
+
+    Raises:
+        PreemptedError: A background call was cancelled for a user request; the
+            caller retries later.
+    """
     sender, subject, body = (
         msg.get("from", ""),
         msg.get("subject", ""),
@@ -175,7 +222,8 @@ def filter_email(msg: dict) -> dict:
     try:
         out = model.call(
             model.EMAIL_SYSTEM,
-            f"From: {sender}\nSubject: {r_subject}\nDate: {msg.get('date', '')}\n\n{r_body[:EMAIL_LIMIT]}",
+            f"From: {sender}\nSubject: {r_subject}\nDate:"
+            f" {msg.get('date', '')}\n\n{r_body[:EMAIL_LIMIT]}",
             model.EMAIL_SCHEMA,
         )
         result["model_used"] = True
@@ -201,7 +249,8 @@ def filter_email(msg: dict) -> dict:
             if isinstance(e, dict)
         ]
     except model.PreemptedError:
-        raise  # cancelled for a user request: retry later, don't cache rules-only
+        # cancelled for a user request: retry later, don't cache rules-only
+        raise
     except Exception:  # noqa: BLE001  (any model failure: fall back to rules only)
         result["bucket"] = _heuristic_bucket(sender, subject, body)
         summary = (
@@ -211,7 +260,8 @@ def filter_email(msg: dict) -> dict:
         )
         events = []
 
-    # Final guarantee: no known PII value survives in summary/events (re-redact with the mapping).
+    # Final guarantee: no known PII value survives in summary/events (re-redact
+    # with the mapping).
     result["summary"] = _apply(summary, mapping_id)
     result["events"] = [
         {k: _apply(v, mapping_id) for k, v in e.items()} for e in events
@@ -220,6 +270,23 @@ def filter_email(msg: dict) -> dict:
 
 
 def filter_page(page: dict) -> dict:
+    """Filters one Notion page before anything about it leaves the host.
+
+    Regex rules redact private values; the local model flags sensitive pages,
+    writes a gist and names extra values to hide (in background chunks of up to
+    1,200 characters, or the start of the page when a user is waiting).
+
+    Args:
+        page: The page (title, text).
+
+    Returns:
+        A dict with sensitive, outline (title, gist, headings), redacted_text,
+            mapping_id and model_used.
+
+    Raises:
+        PreemptedError: A background call was cancelled for a user request; the
+            caller retries later.
+    """
     title, text = page.get("title", ""), page.get("text", "") or ""
     mapping_id = store.new_id()
     r_title = _apply(title, mapping_id)
@@ -253,7 +320,8 @@ def filter_page(page: dict) -> dict:
                 model.PAGE_SYSTEM, f"{head}\n\n{part}", model.PAGE_SCHEMA
             )
             sensitive = sensitive or bool(out.get("sensitive"))
-            # Keep discoveries from completed chunks even if a later model call fails.
+            # Keep discoveries from completed chunks even if a later model call
+            # fails.
             extra = _extras(out.get("extra_pii"), f"{title}\n{text}")
             if extra:
                 r_title = _apply(title, mapping_id, extra)
@@ -267,7 +335,8 @@ def filter_page(page: dict) -> dict:
                 gist = out.get("gist") or ""
         model_used = True
     except model.PreemptedError:
-        raise  # cancelled for a user request: retry later, don't cache rules-only
+        # cancelled for a user request: retry later, don't cache rules-only
+        raise
     except Exception:  # noqa: BLE001  (any model failure: fall back to rules only)
         body_lines = [
             line

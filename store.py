@@ -1,6 +1,7 @@
-"""Numbered suggestions waiting for your decision (events to add, emails to reply to).
+"""Numbered suggestions waiting for the user's decision.
 
-Shared by the broker and its helpers. File-locked so concurrent writers are safe.
+Events to add and emails to reply to, shared by the broker and its helpers.
+File-locked so concurrent writers are safe.
 """
 
 import datetime as dt
@@ -17,6 +18,15 @@ KEEP_DAYS = 14
 
 @contextmanager
 def pending():
+    """Opens the pending-items store for reading and writing, under a file lock.
+
+    Items older than KEEP_DAYS are dropped when the block exits; numbering
+    restarts at 1 once the store is empty.
+
+    Yields:
+        The store as a dict: {"next": int, "items": {"<n>": item}}. Changes are
+            saved on exit.
+    """
     with open(DATA / ".pending.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         data = (
@@ -45,6 +55,7 @@ def pending():
 
 
 def add(data, item) -> int:
+    """Adds `item` to the store as the next number and returns that number."""
     n = data["next"]
     data["next"] += 1
     item["id"] = n

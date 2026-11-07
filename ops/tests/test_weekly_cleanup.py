@@ -1,4 +1,4 @@
-"""Tests for ops/weekly_cleanup.py with a fake broker (no Gmail, no Telegram)."""
+"""Tests for ops/weekly_cleanup.py with a fake broker (no Gmail or Telegram)."""
 
 import importlib.util
 import sys

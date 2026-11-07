@@ -1,4 +1,7 @@
-"""Tiny stdlib-only client for the privacy broker socket (used inside the container; holds no keys)."""
+"""Tiny stdlib-only client for the privacy broker socket.
+
+Runs inside the container and holds no keys.
+"""
 
 import json
 import os
@@ -15,7 +18,8 @@ def call(op, **args):
         s.connect(SOCK)
     except OSError as e:
         sys.exit(
-            f"Can't reach the privacy broker at {SOCK} ({e}). Is it running on the laptop?"
+            f"Can't reach the privacy broker at {SOCK} ({e}). Is it running on"
+            " the laptop?"
         )
     s.sendall((json.dumps({"op": op, "args": args}) + "\n").encode())
     buf = b""

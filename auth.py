@@ -2,9 +2,9 @@
 
 Usage:
     uv run auth.py <nickname>              # mail-only account
-    uv run auth.py <nickname> --calendar   # account that also holds the AI Suggestions calendar
+    uv run auth.py <nickname> --calendar   # account holding the calendar
 
-Saves the login to tokens/<nickname>.json (readable only by you).
+Saves the login to tokens/<nickname>.json, readable only by the user.
 """
 
 import os
@@ -17,15 +17,19 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 HERE = Path(__file__).parent
-# Everything private/changing lives in DATA, so the code folder can be mounted read-only.
+# Everything private/changing lives in DATA, so the code folder can be mounted
+# read-only.
 DATA = Path(os.environ.get("DINGDING_DATA", HERE / "data"))
 TOKENS = DATA / "tokens"
 
 MAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",  # read mail
-    "https://www.googleapis.com/auth/gmail.compose",  # create drafts (this code never sends)
-    "https://www.googleapis.com/auth/gmail.insert",  # drop the morning summary into the inbox
-    "https://www.googleapis.com/auth/gmail.modify",  # archive (remove Inbox label) when the user asks
+    # create drafts (this code never sends)
+    "https://www.googleapis.com/auth/gmail.compose",
+    # drop the morning summary into the inbox
+    "https://www.googleapis.com/auth/gmail.insert",
+    # archive (remove Inbox label) when the user asks
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 # Only calendars this app creates; it cannot touch your other calendars.
 CALENDAR_SCOPES = ["https://www.googleapis.com/auth/calendar.app.created"]
@@ -37,6 +41,13 @@ READONLY_MAIL_SCOPES = [
 
 
 def scopes_for(with_calendar: bool, readonly: bool = False) -> list[str]:
+    """Returns the OAuth scopes to request for an account.
+
+    Args:
+        with_calendar: Also request calendar access (the account that holds the
+            calendar).
+        readonly: Request read-only mail access instead of compose/modify.
+    """
     return (READONLY_MAIL_SCOPES if readonly else MAIL_SCOPES) + (
         CALENDAR_SCOPES if with_calendar else []
     )
@@ -53,6 +64,7 @@ def load(nickname: str) -> Credentials:
 
 
 def save(path: Path, creds: Credentials) -> None:
+    """Writes the credentials to `path` with mode 0600."""
     TOKENS.mkdir(mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -60,6 +72,7 @@ def save(path: Path, creds: Credentials) -> None:
 
 
 def main() -> None:
+    """Runs the browser sign-in for the nickname given on the command line."""
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(args) != 1:
         sys.exit(__doc__)
@@ -71,7 +84,8 @@ def main() -> None:
         HERE / "credentials.json", scopes_for(with_calendar, readonly)
     )
     print(
-        f"Opening your browser. Sign in with the account you want to call '{nickname}'."
+        "Opening your browser. Sign in with the account you want to call"
+        f" '{nickname}'."
     )
     creds = flow.run_local_server(
         port=0, prompt="consent", access_type="offline"

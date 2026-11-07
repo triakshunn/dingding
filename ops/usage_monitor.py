@@ -1,11 +1,15 @@
-"""Read OpenClaw usage metadata without model/API calls or exporting conversation content.
+"""OpenClaw usage reports and the usage breaker; no model or API calls.
 
-Usage breaker: if recorded tokens in a rolling window pass a ceiling, stop the OpenClaw container, write a latch
-(data/usage/breaker.json) and send one Telegram alert. It stays stopped until `usage_monitor.py --resume`.
-Only completed runs are recorded, so a run still in progress can overshoot the ceiling before it trips.
+Reads OpenClaw's usage metadata (never prompts, responses or tool results),
+keeps a deduplicated local ledger, and writes daily JSON/Markdown reports. Token
+counts are observed OpenClaw counters, not billed dollars or remaining
+subscription allowance.
 
-Keeps a deduplicated local ledger and daily JSON/Markdown reports. Token counts are
-observed OpenClaw counters, not billed dollars or remaining subscription allowance.
+Usage breaker: if recorded tokens in a rolling window pass a ceiling, stop the
+OpenClaw container, write a latch (data/usage/breaker.json) and send one
+Telegram alert. It stays stopped until `usage_monitor.py --resume`. Only
+completed runs are recorded, so a run still in progress can overshoot the
+ceiling before it trips.
 """
 
 import argparse
@@ -52,23 +56,31 @@ COUNTERS = (
     "total",
 )
 
-# Extract metadata inside SQLite: never load prompts, responses, arguments, or tool results.
+# Extract metadata inside SQLite: never load prompts, responses, arguments, or
+# tool results.
 QUERY = """
 SELECT session_id, run_id, seq,
- json_extract(event_json, '$.type'), json_extract(event_json, '$.ts'),
- json_extract(event_json, '$.provider'), json_extract(event_json, '$.modelId'),
- json_extract(event_json, '$.sessionKey'), json_extract(event_json, '$.data.usage'),
- json_extract(event_json, '$.data.name'),
- json_array_length(json_extract(event_json, '$.data.tools')),
- json_extract(event_json, '$.data.aborted'), json_extract(event_json, '$.data.timedOut'),
- coalesce(json_extract(event_json, '$.data.promptError') NOT IN ('', 0), 0)
+  json_extract(event_json, '$.type'),
+  json_extract(event_json, '$.ts'),
+  json_extract(event_json, '$.provider'),
+  json_extract(event_json, '$.modelId'),
+  json_extract(event_json, '$.sessionKey'),
+  json_extract(event_json, '$.data.usage'),
+  json_extract(event_json, '$.data.name'),
+  json_array_length(json_extract(event_json, '$.data.tools')),
+  json_extract(event_json, '$.data.aborted'),
+  json_extract(event_json, '$.data.timedOut'),
+  coalesce(
+    json_extract(event_json, '$.data.promptError') NOT IN ('', 0), 0)
 FROM trajectory_runtime_events
-WHERE json_extract(event_json, '$.type') IN ('model.completed', 'tool.call', 'context.compiled')
+WHERE json_extract(event_json, '$.type')
+  IN ('model.completed', 'tool.call', 'context.compiled')
 ORDER BY session_id, seq
 """
 
 
 def nonnegative(value):
+    """Returns `value` if it is a non-negative int (not bool), else 0."""
     return (
         max(0, value)
         if isinstance(value, int) and not isinstance(value, bool)
@@ -77,7 +89,18 @@ def nonnegative(value):
 
 
 def collect(path):
-    """Return one summary per recorded run; completion usage is already aggregated across its steps."""
+    """Summarizes every completed OpenAI run in one agent's usage database.
+
+    Completion usage is already aggregated across a run's steps, so only the
+    last completion per run counts.
+
+    Args:
+        path: An agent's openclaw-agent.sqlite (opened read-only).
+
+    Returns:
+        One dict per completed run: id (hashed), agent, model, workload, tokens,
+            tool counts, timestamps and flags.
+    """
     agent = path.parent.parent.name
     runs = {}
     with sqlite3.connect(
@@ -123,7 +146,8 @@ def collect(path):
             elif kind == "context.compiled":
                 r["tool_catalog_size"] = catalog
             else:
-                # Use the last completion for this run, never add it to transcript/snapshot totals.
+                # Use the last completion for this run, never add it to
+                # transcript/snapshot totals.
                 usage = json.loads(raw_usage) if raw_usage else None
                 r.update(
                     at=timestamp,
@@ -144,7 +168,9 @@ def collect(path):
     completed = []
     for r in runs.values():
         if "at" not in r:
-            continue  # Running turns enter the ledger once completion metadata is available.
+            # Running turns enter the ledger once completion metadata is
+            # available.
+            continue
         if r["workload"] != "scheduled" and r["tools"].get("heartbeat_respond"):
             r["workload"] = "heartbeat"
         r["tool_calls"] = sum(r["tools"].values())
@@ -159,6 +185,7 @@ def collect(path):
 
 
 def aggregate(rows):
+    """Totals token counters and run counts over `rows`."""
     out = {
         k: sum(r["tokens"][k] for r in rows if r["usage_known"])
         for k in COUNTERS
@@ -170,7 +197,8 @@ def aggregate(rows):
         tool_calls=sum(r["tool_calls"] for r in rows),
         prompt_errors=sum(r["prompt_error"] for r in rows),
     )
-    # OpenClaw normalizes these fields as disjoint counters (unlike raw OpenAI API input_tokens).
+    # OpenClaw normalizes these fields as disjoint counters (unlike raw OpenAI
+    # API input_tokens).
     out["all_input"] = out["input"] + out["cacheRead"] + out["cacheWrite"]
     out["cache_hit_percent"] = (
         round(100 * out["cacheRead"] / out["all_input"], 2)
@@ -184,6 +212,17 @@ def aggregate(rows):
 
 
 def make_report(rows, day, change_at=None):
+    """Builds the day's report: totals by workload, model, hour and phase.
+
+    Args:
+        rows: Ledger rows (any days; filtered to `day`).
+        day: The local date to report on, YYYY-MM-DD.
+        change_at: Optional deployment time; totals are also split before/after
+            it.
+
+    Returns:
+        The report as a JSON-serializable dict.
+    """
     rows = sorted((r for r in rows if r["day"] == day), key=lambda r: r["at"])
     workloads = defaultdict(list)
     models = defaultdict(list)
@@ -202,12 +241,24 @@ def make_report(rows, day, change_at=None):
         "date": day,
         "timezone": str(TZ),
         "updated_at": dt.datetime.now(TZ).isoformat(),
-        "scope": "Recorded OpenClaw OpenAI completions only; excludes Codex CLI and local Ollama. Not billing or remaining quota.",
+        "scope": (
+            "Recorded OpenClaw OpenAI completions only; excludes Codex CLI and"
+            " local Ollama. Not billing or remaining quota."
+        ),
         "notes": [
-            "Input is uncached; cacheRead/cacheWrite are separate OpenClaw counters.",
+            (
+                "Input is uncached; cacheRead/cacheWrite are separate OpenClaw"
+                " counters."
+            ),
             "Reasoning is included in output: do not add it again.",
-            "Missing usage is unknown, not zero; running turns are not yet counted.",
-            "Before/after tasks differ; this is not a controlled savings experiment.",
+            (
+                "Missing usage is unknown, not zero; running turns are not yet"
+                " counted."
+            ),
+            (
+                "Before/after tasks differ; this is not a controlled savings"
+                " experiment."
+            ),
         ],
         "totals": aggregate(rows),
         "workloads": {k: aggregate(v) for k, v in workloads.items()},
@@ -224,6 +275,7 @@ def make_report(rows, day, change_at=None):
 
 
 def markdown(report):
+    """Renders a report dict as the Markdown summary (latest.md)."""
     t = report["totals"]
     lines = [
         f"# OpenClaw usage — {report['date']}",
@@ -246,18 +298,25 @@ def markdown(report):
         "",
         "## By workload",
         "",
-        "| Workload | Measured runs | Uncached input | Cached input | Output | Tool calls |",
+        (
+            "| Workload | Measured runs | Uncached input | Cached input |"
+            " Output | Tool calls |"
+        ),
         "|---|---:|---:|---:|---:|---:|",
     ]
     for name, v in report["workloads"].items():
         lines.append(
-            f"| {name} | {v['measured_turns']} | {v['input']:,} | {v['cacheRead']:,} | {v['output']:,} | {v['tool_calls']} |"
+            f"| {name} | {v['measured_turns']} | {v['input']:,} |"
+            f" {v['cacheRead']:,} | {v['output']:,} | {v['tool_calls']} |"
         )
     lines += [
         "",
         "## Recent runs",
         "",
-        "| Time | Workload | Model | Uncached | Cached | Output | Tools | Catalog size |",
+        (
+            "| Time | Workload | Model | Uncached | Cached | Output | Tools |"
+            " Catalog size |"
+        ),
         "|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for r in report["recent_turns"]:
@@ -272,13 +331,15 @@ def markdown(report):
             for k in ("input", "cacheRead", "output")
         ]
         lines.append(
-            f"| {at} | {r['workload']} | {r['model']} | {' | '.join(counts)} | {r['tool_calls']} | {r['tool_catalog_size']} |"
+            f"| {at} | {r['workload']} | {r['model']} | {' | '.join(counts)} |"
+            f" {r['tool_calls']} | {r['tool_catalog_size']} |"
         )
     lines += ["", "## Interpretation", ""] + [f"- {n}" for n in report["notes"]]
     return "\n".join(lines) + "\n"
 
 
 def write_private(path, text):
+    """Atomically writes `text` to `path` with mode 0600."""
     fd, tmp = tempfile.mkstemp(prefix=".usage-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as f:
@@ -290,12 +351,13 @@ def write_private(path, text):
 
 
 def run_tokens(r):
+    """Returns a run's total tokens: all input (incl. cached) plus output."""
     t = r["tokens"]
     return t["input"] + t["cacheRead"] + t["cacheWrite"] + t["output"]
 
 
 def window_usage(rows, now, minutes):
-    """Tokens and runs completed within the last `minutes` (rows from the ledger, any day)."""
+    """Returns (tokens, runs) completed in the last `minutes` before `now`."""
     cutoff = now - dt.timedelta(minutes=minutes)
     recent = [
         r
@@ -310,6 +372,7 @@ def window_usage(rows, now, minutes):
 
 
 def docker(*args):
+    """Runs `docker <args>` and returns its exit code (-1 if docker fails)."""
     try:
         return subprocess.run(
             ["docker", *args],
@@ -323,7 +386,7 @@ def docker(*args):
 
 
 def alert(text):
-    """Telegram via the watchdog's sender (token read on the host, never printed)."""
+    """Sends a Telegram message via the watchdog's sender; never raises."""
     try:
         spec = importlib.util.spec_from_file_location(
             "watchdog", Path(__file__).with_name("watchdog.py")
@@ -336,6 +399,7 @@ def alert(text):
 
 
 def latch(reason, **info):
+    """Writes the breaker latch file with the reason and extra info."""
     write_private(
         BREAKER,
         json.dumps(
@@ -359,7 +423,22 @@ def check_breaker(
     stop=docker,
     notify=alert,
 ):
-    """Trip once: stop the container, latch, alert. Returns True if it tripped on this call."""
+    """Trips the usage breaker once if the window's usage passed the limit.
+
+    Stops the container, writes the latch and sends one alert. Does nothing
+    while the latch exists.
+
+    Args:
+        rows: Ledger rows of recent days.
+        now: The current time (timezone-aware).
+        minutes: Size of the rolling window.
+        limit: Token ceiling for the window.
+        stop: Called as stop("stop", container); returns 0 on success.
+        notify: Called with the alert text.
+
+    Returns:
+        Whether the breaker tripped on this call.
+    """
     if BREAKER.exists():
         return False
     used, runs = window_usage(rows, now, minutes)
@@ -375,19 +454,25 @@ def check_breaker(
         container_stopped=stopped,
     )
     notify(
-        f"⛔ dingding paused: OpenAI usage reached {used:,} tokens in the last {minutes} min "
-        f"({runs} runs; limit {limit:,}). Telegram replies and briefs are off"
+        f"⛔ dingding paused: OpenAI usage reached {used:,} tokens in the last"
+        f" {minutes} min ({runs} runs; limit {limit:,}). Telegram replies and"
+        " briefs are off"
         + (
             ""
             if stopped
             else " — but stopping the container FAILED, check the laptop"
         )
-        + ". To resume, on the laptop: cd ~/dingding && .venv/bin/python ops/usage_monitor.py --resume"
+        + ". To resume, on the laptop: cd ~/dingding && .venv/bin/python"
+        " ops/usage_monitor.py --resume"
     )
     return True
 
 
 def main():
+    """Updates the ledger and reports, then checks the breaker.
+
+    With --resume or --pause, only clears or sets the breaker latch.
+    """
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--state", type=Path, default=Path.home() / "dingding/docker/state"
@@ -396,7 +481,10 @@ def main():
     p.add_argument("--date", default=dt.datetime.now(TZ).date().isoformat())
     p.add_argument(
         "--change-at",
-        help="Timezone-qualified deployment timestamp for descriptive before/after totals",
+        help=(
+            "Timezone-qualified deployment timestamp for descriptive"
+            " before/after totals"
+        ),
     )
     p.add_argument(
         "--resume",
@@ -442,7 +530,8 @@ def main():
     os.chmod(a.output, 0o700)
     with sqlite3.connect(a.output / "usage.sqlite") as ledger:
         ledger.execute(
-            "CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, day TEXT NOT NULL, metadata TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, day TEXT NOT"
+            " NULL, metadata TEXT NOT NULL)"
         )
         ledger.executemany(
             "INSERT OR REPLACE INTO runs VALUES (?, ?, ?)",

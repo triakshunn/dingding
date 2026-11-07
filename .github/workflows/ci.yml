@@ -25,10 +25,9 @@ jobs:
       - name: Format check (ruff, Black/Pyink style)
         run: uv run ruff format --check .
 
-      # Docstrings (D1/D205) and long comment lines (E501) are still being
-      # fixed; every other Google-style rule is enforced.
+      # Google Python Style Guide rules (pyproject.toml), all enforced.
       - name: Lint (ruff)
-        run: uv run ruff check --ignore D1,D205,E501 .
+        run: uv run ruff check .
 
       # Each suite runs under coverage; on failure the tail of its output is
       # posted as an annotation so it is visible without opening the logs.

@@ -29,7 +29,8 @@ class UsageMonitorTests(unittest.TestCase):
         self.db = sqlite3.connect(self.path)
         self.addCleanup(self.db.close)
         self.db.execute(
-            "CREATE TABLE trajectory_runtime_events (session_id TEXT, run_id TEXT, seq INTEGER, event_json TEXT)"
+            "CREATE TABLE trajectory_runtime_events (session_id TEXT, run_id"
+            " TEXT, seq INTEGER, event_json TEXT)"
         )
 
     def event(self, seq, kind, data, run="run1", provider="openai"):

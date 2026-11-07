@@ -1,4 +1,7 @@
-"""Unit tests (model mocked). Run: cd ~/dingding && uv run --with pytest pytest -q privacy/tests"""
+"""Unit tests for the privacy filter, with the model mocked.
+
+Run: uv run --with pytest pytest -q privacy/tests
+"""
 
 import os
 import stat
@@ -142,8 +145,10 @@ CHASE = {
     "from": "Chase <alerts@chase.com>",
     "subject": "Your statement is ready",
     "date": "Thu, 5 Nov 2026",
-    "body": "Your statement for account ending 4821 is ready. Minimum payment of $35.00 is due Nov 20. "
-    "Questions? Call 1-800-935-9935.",
+    "body": (
+        "Your statement for account ending 4821 is ready. Minimum payment of"
+        " $35.00 is due Nov 20. Questions? Call 1-800-935-9935."
+    ),
 }
 
 
@@ -306,7 +311,10 @@ def test_page_sensitive_by_title_and_outline_has_no_pii(monkeypatch):
     page = {
         "id": "p1",
         "title": "Insurance",
-        "text": "# Car\nPolicy for 2019 Civic. Agent phone (734) 555-0199.\n## Claims\nClaim filed March.",
+        "text": (
+            "# Car\nPolicy for 2019 Civic. Agent phone (734) 555-0199.\n##"
+            " Claims\nClaim filed March."
+        ),
     }
     r = privacy.filter_page(page)
     assert r["sensitive"]
@@ -416,8 +424,10 @@ def test_model_requests_keep_alive(monkeypatch):
 
 
 def test_id_context_is_checked_for_every_match():
-    # Regression: the loop variable `kind` was overwritten after the first match, so later 8-digit numbers of the
-    # same pattern skipped the context check (an order number after a student ID got hidden).
+    # Regression: the loop variable `kind` was overwritten after the first
+    # match, so later 8-digit numbers of the
+    # same pattern skipped the context check (an order number after a student ID
+    # got hidden).
     found = patterns.find_pii(
         "Your student ID 12345678 was updated. Order #87654321 shipped."
     )

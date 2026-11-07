@@ -1,4 +1,7 @@
-"""Host-only store mapping placeholders <-> real values. Never mount this into the container."""
+"""Host-only store mapping placeholders to real values.
+
+Never mount this into the container.
+"""
 
 import json
 import os
@@ -10,6 +13,7 @@ ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 def state_dir() -> Path:
+    """Returns the mappings directory (PRIVACY_STATE), created mode 0700."""
     d = Path(
         os.environ.get(
             "PRIVACY_STATE",
@@ -22,6 +26,7 @@ def state_dir() -> Path:
 
 
 def new_id() -> str:
+    """Returns a new random mapping id."""
     return uuid.uuid4().hex
 
 
@@ -32,6 +37,7 @@ def _path(mapping_id: str) -> Path:
 
 
 def load(mapping_id: str) -> dict:
+    """Returns the mapping with this id, or an empty one if it doesn't exist."""
     p = _path(mapping_id)
     if p.exists():
         return json.loads(p.read_text())
@@ -39,6 +45,7 @@ def load(mapping_id: str) -> dict:
 
 
 def save(mapping_id: str, m: dict) -> None:
+    """Atomically writes the mapping with this id (mode 0600)."""
     p = _path(mapping_id)
     tmp = p.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

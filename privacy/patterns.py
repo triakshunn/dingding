@@ -1,4 +1,4 @@
-"""Layer 1: deterministic detectors. Each returns (kind, exact_value) pairs found in text."""
+"""Layer 1: deterministic detectors for private values and sensitive mail."""
 
 import re
 
@@ -8,9 +8,11 @@ from . import config
 _PATTERNS = [
     # US social security number
     ("SSN", re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), 0),
-    # Full card numbers 13-19 digits, optionally grouped (checked with Luhn below)
+    # Full card numbers 13-19 digits, optionally grouped (checked with Luhn
+    # below)
     ("CARD", re.compile(r"\b(?:\d[ -]?){12,18}\d\b"), 0),
-    # Masked / partial account or card numbers: "ending 4821", "ending in 4821", "ends in 4821", "****4821", "x4821"
+    # Masked / partial account or card numbers: "ending 4821", "ending in 4821",
+    # "ends in 4821", "****4821", "x4821"
     (
         "ACCOUNT",
         re.compile(
@@ -23,7 +25,8 @@ _PATTERNS = [
     (
         "ACCOUNT",
         re.compile(
-            r"(?i)\b(?:account|acct|a/c|routing|member)\s*(?:no\.?|number|num|#)?\s*[:#]?\s*(\d[\d -]{4,20}\d)\b"
+            r"(?i)\b(?:account|acct|a/c|routing|member)\s*(?:no\.?|number|num|#)?\s*[:#]?\s*(\d[\d"
+            r" -]{4,20}\d)\b"
         ),
         1,
     ),
@@ -31,7 +34,8 @@ _PATTERNS = [
     (
         "CODE",
         re.compile(
-            r"(?i)\b(?:code|otp|passcode|pin|verification|security code)\b[^\d\n]{0,25}(\d{4,8})\b"
+            r"(?i)\b(?:code|otp|passcode|pin|verification|security"
+            r" code)\b[^\d\n]{0,25}(\d{4,8})\b"
         ),
         1,
     ),
@@ -46,8 +50,10 @@ _PATTERNS = [
     (
         "DOB",
         re.compile(
-            r"(?i)\b(?:dob|d\.o\.b\.?|date of birth|born on|birth ?date)\s*[:\-]?\s*"
-            r"(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]{2,8}\.? \d{1,2},? \d{4})"
+            r"(?i)\b(?:dob|d\.o\.b\.?|date of birth|born on|birth"
+            r" ?date)\s*[:\-]?\s*"
+            r"(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{4}-\d{2}-\d{2}|[A-Z][a-z]{2,8}\.?"
+            r" \d{1,2},? \d{4})"
         ),
         1,
     ),
@@ -57,15 +63,19 @@ _PATTERNS = [
     (
         "ID",
         re.compile(
-            r"(?i)\b(?:umid|student id|employee id|emplid|uniqname id|id number|id no\.?|id#)\s*[:#]?\s*([A-Z0-9]{5,12})\b"
+            r"(?i)\b(?:umid|student id|employee id|emplid|uniqname id|id"
+            r" number|id no\.?|id#)\s*[:#]?\s*([A-Z0-9]{5,12})\b"
         ),
         1,
     ),
-    # Bare 8-digit numbers (UMID-like). Context-checked in find_pii(): kept visible when clearly an
-    # order/tracking/confirmation/invoice/booking number, hidden otherwise (safer default).
+    # Bare 8-digit numbers (UMID-like). Context-checked in find_pii(): kept
+    # visible when clearly an
+    # order/tracking/confirmation/invoice/booking number, hidden otherwise
+    # (safer default).
     ("ID8", re.compile(r"(?<![\d$.,/:-])\b\d{8}\b(?![\d.,/:-])"), 0),
     # Phone numbers: international with +, then US formats
-    # International "+" numbers of any grouping (+65 9123 4567, +91-9876543210, +44 20 7946 0958);
+    # International "+" numbers of any grouping (+65 9123 4567, +91-9876543210,
+    # +44 20 7946 0958);
     # digit count is checked in find_pii() (8-15 digits)
     ("PHONE+", re.compile(r"\+\d{1,3}(?:[\s.-]?\(?\d{1,5}\)?){1,5}\b"), 0),
     (
@@ -82,7 +92,8 @@ _PATTERNS = [
     ),  # incl. Indian mobiles (6-9xxxxxxxxx)
     # Indian mobile grouped 5+5 without +91: "98765 43210"
     ("PHONE", re.compile(r"(?<![\d-])\b[6-9]\d{4}[\s-]\d{5}\b(?![\d-])"), 0),
-    # Local numbers next to a phone word: US 7-digit "555-0100", Singapore 8-digit "9123 4567"
+    # Local numbers next to a phone word: US 7-digit "555-0100", Singapore
+    # 8-digit "9123 4567"
     (
         "PHONE",
         re.compile(
@@ -91,7 +102,8 @@ _PATTERNS = [
         ),
         1,
     ),
-    # Street addresses (best effort): number + 1-4 capitalised words + street suffix (+ optional unit)
+    # Street addresses (best effort): number + 1-4 capitalised words + street
+    # suffix (+ optional unit)
     (
         "ADDRESS",
         re.compile(
@@ -102,7 +114,8 @@ _PATTERNS = [
         ),
         0,
     ),
-    # Singapore HDB/condo: "Blk 123 Ang Mo Kio Ave 3 #05-12" (+ optional "Singapore 560123")
+    # Singapore HDB/condo: "Blk 123 Ang Mo Kio Ave 3 #05-12" (+ optional
+    # "Singapore 560123")
     (
         "ADDRESS",
         re.compile(
@@ -121,10 +134,13 @@ _PATTERNS = [
     (
         "POSTAL",
         re.compile(
-            r"(?i)\b(?:Mumbai|New Delhi|Delhi|Bengaluru|Bangalore|Chennai|Kolkata|Hyderabad|Pune|"
+            r"(?i)\b(?:Mumbai|New"
+            r" Delhi|Delhi|Bengaluru|Bangalore|Chennai|Kolkata|Hyderabad|Pune|"
             r"Ahmedabad|Jaipur|Lucknow|Surat|Noida|Gurgaon|Gurugram|Chandigarh|Indore|Bhopal|Nagpur|"
-            r"Kochi|Coimbatore|Vadodara|Thane|Navi Mumbai|Maharashtra|Karnataka|Gujarat|Tamil Nadu|"
-            r"Kerala|Telangana|Uttar Pradesh|Rajasthan|Haryana|Punjab|West Bengal|Madhya Pradesh|"
+            r"Kochi|Coimbatore|Vadodara|Thane|Navi"
+            r" Mumbai|Maharashtra|Karnataka|Gujarat|Tamil Nadu|"
+            r"Kerala|Telangana|Uttar Pradesh|Rajasthan|Haryana|Punjab|West"
+            r" Bengal|Madhya Pradesh|"
             r"Andhra Pradesh|Bihar|Odisha|Goa|India)\b[,\s-]*(\d{3}\s?\d{3})\b"
         ),
         1,
@@ -165,7 +181,15 @@ def _luhn_ok(digits: str) -> bool:
 
 
 def find_pii(text: str) -> list[tuple[str, str]]:
-    """All (kind, value) pairs, deduplicated, values as they appear in the text."""
+    """Finds private values (phones, cards, IDs, codes, ...) in text.
+
+    Args:
+        text: Any text.
+
+    Returns:
+        Deduplicated (kind, value) pairs, values exactly as they appear in the
+            text, e.g. ("PHONE", "(734) 555-0199").
+    """
     found, spans = [], []
     for pattern_kind, rx, group in _PATTERNS:
         for m in rx.finditer(text):
@@ -189,7 +213,8 @@ def find_pii(text: str) -> list[tuple[str, str]]:
                 ):
                     continue  # e.g. "Order #12345678" stays visible
                 kind = "ID"
-            # skip if fully inside an already-found span (e.g. 8 digits inside a card number)
+            # skip if fully inside an already-found span (e.g. 8 digits inside a
+            # card number)
             if any(s <= start and end <= e for s, e in spans):
                 continue
             spans.append((start, end))
@@ -203,11 +228,13 @@ def find_pii(text: str) -> list[tuple[str, str]]:
 
 
 def should_drop(subject: str, body: str) -> bool:
+    """Returns whether this is a security-code email to withhold."""
     text = f"{subject}\n{body[:800]}".lower()
     return any(re.search(p, text) for p in config.DROP_PATTERNS)
 
 
 def sender_sensitive(sender: str) -> bool:
+    """Returns whether the sender is on the always-sensitive list."""
     s = (sender or "").lower()
     return any(x in s for x in config.SENSITIVE_SENDERS)
 
@@ -219,6 +246,7 @@ _FOOTER = re.compile(
 
 
 def keywords_sensitive(text: str) -> bool:
+    """Returns whether the text mentions sensitive topics (footers ignored)."""
     t = text or ""
     m = _FOOTER.search(t)
     if m:
@@ -228,5 +256,6 @@ def keywords_sensitive(text: str) -> bool:
 
 
 def title_sensitive(title: str) -> bool:
+    """Returns whether a Notion page title marks it as sensitive."""
     t = (title or "").lower()
     return any(k in t for k in config.SENSITIVE_PAGE_TITLES)

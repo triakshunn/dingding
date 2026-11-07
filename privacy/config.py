@@ -1,6 +1,10 @@
-"""Tunable lists for the deterministic layer. Edit freely; everything is lowercase-matched."""
+"""Tunable lists for the deterministic layer.
 
-# Sender domains / addresses whose mail is always "sensitive" (never released in full to the cloud model).
+Edit freely; everything is matched in lowercase.
+"""
+
+# Sender domains / addresses whose mail is always "sensitive" (never released in
+# full to the cloud model).
 SENSITIVE_SENDERS = [
     # banks / payments
     "chase.com",
@@ -41,7 +45,8 @@ SENSITIVE_SENDERS = [
     "ice.gov",
     "studentaid.gov",
     "ssa.gov",
-    # add your school's international office here, e.g. "intl-office@example.edu"
+    # add your school's international office here, e.g.
+    # "intl-office@example.edu"
     # health / insurance
     "mychart",  # add your health system's domains
     "aetna.com",
@@ -61,13 +66,19 @@ SENSITIVE_SENDERS = [
 ]
 
 # Patterns that make an email or page sensitive regardless of sender.
-# Regexes with word boundaries, matched against the subject + main body only (footers stripped),
-# so "upgrade", "opt out", "transcription" etc. don't trigger. (?-i:...) = case-sensitive part.
+# Regexes with word boundaries, matched against the subject + main body only
+# (footers stripped),
+# so "upgrade", "opt out", "transcription" etc. don't trigger. (?-i:...) =
+# case-sensitive part.
 SENSITIVE_KEYWORDS = [
     # immigration
     r"\b(?:F-1|J-1|H-1B|I-20|I20|SEVIS|EAD)\b",
     r"(?-i:\bOPT\b|\bCPT\b|\bSTEM OPT\b)",
-    r"\bvisa (?:appointment|interview|status|application|stamp|renewal|expir\w*)\b",
+    (
+        r"\bvisa"
+        r" (?:appointment|interview|status|application|stamp|renewal"
+        r"|expir\w*)\b"
+    ),
     r"\bpassport\b",
     r"\bimmigration\b",
     r"\bgreen card\b",
@@ -113,7 +124,8 @@ SENSITIVE_KEYWORDS = [
     r"\bnew sign-?in\b",
 ]
 
-# Body text after any of these lines is treated as footer and ignored by the keyword check.
+# Body text after any of these lines is treated as footer and ignored by the
+# keyword check.
 FOOTER_MARKERS = [
     r"unsubscribe",
     r"opt[- ]out",

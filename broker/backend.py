@@ -1,7 +1,8 @@
-"""The ONLY place the broker touches Google and Notion. Tests replace this with a fake.
+"""The only place the broker talks to Google and Notion; tests use a fake.
 
-Runs on the host with the FULL Gmail logins (~/dingding/data/tokens) and the Notion key.
-Nothing here sends email: drafts only. Archiving only removes the Inbox/Unread labels.
+Runs on the host with the full Gmail logins (data/tokens) and the Notion key.
+Nothing here sends email: drafts only. Archiving only removes the Inbox/Unread
+labels.
 """
 
 import datetime as dt
@@ -22,9 +23,15 @@ _REAL_NOTION_API = notion.api
 
 
 class RealBackend:
+    """Gmail, Calendar and Notion access with the user's real credentials.
+
+    The broker calls only these methods, so tests can swap in a fake backend.
+    """
+
     gmail_query = GMAIL_QUERY
 
     def accounts(self):
+        """Returns the account nicknames that have a saved login."""
         return [t.stem for t in sorted(TOKENS.glob("*.json"))]
 
     def _gmail(self, acct):
@@ -33,6 +40,7 @@ class RealBackend:
         )
 
     def profile_email(self, acct):
+        """Returns the email address of an account."""
         return (
             self._gmail(acct)
             .users()
@@ -41,6 +49,7 @@ class RealBackend:
         )
 
     def mail_list(self, acct, query, max_results):
+        """Returns ids of up to `max_results` messages matching `query`."""
         r = (
             self._gmail(acct)
             .users()
@@ -51,6 +60,12 @@ class RealBackend:
         return [m["id"] for m in r.get("messages", [])]
 
     def mail_get(self, acct, mid):
+        """Fetches one message with its plain-text body (at most 12,000 chars).
+
+        Returns:
+            A dict with account, id, thread_id, from, reply_to, to, subject,
+                date (ISO, user's timezone), message_id, references and body.
+        """
         msg = (
             self._gmail(acct)
             .users()
@@ -87,6 +102,7 @@ class RealBackend:
         }
 
     def thread_of(self, acct, mid):
+        """Returns the id of the conversation containing a message."""
         return (
             self._gmail(acct)
             .users()
@@ -96,7 +112,13 @@ class RealBackend:
         )
 
     def thread_meta(self, acct, mid):
-        """Headers only (From/To/Date) for every message in the conversation containing `mid`. No bodies."""
+        """Returns From/To/Date of every message in the conversation of `mid`.
+
+        Headers only: no bodies are fetched.
+
+        Returns:
+            {"thread_id": ..., "messages": [{id, from, to, date, labels}, ...]}.
+        """
         g = self._gmail(acct).users()
         tid = (
             g.messages()
@@ -134,7 +156,13 @@ class RealBackend:
         return {"thread_id": tid, "messages": msgs}
 
     def archive(self, acct, thread_id, mark_read=True):
-        """Remove the Inbox label (and optionally Unread) from a whole conversation. Nothing else."""
+        """Removes the Inbox (and optionally Unread) label from a conversation.
+
+        Nothing else changes; the mail stays in All Mail.
+
+        Returns:
+            {"unread": ids that were unread}, so unarchive can restore them.
+        """
         g = self._gmail(acct).users()
         t = (
             g.threads()
@@ -156,6 +184,13 @@ class RealBackend:
         return {"unread": unread if mark_read else []}
 
     def unarchive(self, acct, thread_id, unread=()):
+        """Moves a conversation back to the Inbox.
+
+        Args:
+            acct: Account nickname.
+            thread_id: The conversation.
+            unread: Message ids to mark unread again (as archive returned them).
+        """
         g = self._gmail(acct).users()
         g.threads().modify(
             userId="me", id=thread_id, body={"addLabelIds": ["INBOX"]}
@@ -167,7 +202,7 @@ class RealBackend:
             ).execute()
 
     def list_ids(self, acct, query, cap, include_spam=False):
-        """Message ids matching a Gmail query (paginated, at most `cap`)."""
+        """Returns ids matching a Gmail query (paginated, at most `cap`)."""
         g, ids, token = self._gmail(acct).users(), [], None
         while len(ids) < cap:
             r = (
@@ -188,6 +223,7 @@ class RealBackend:
         return ids[:cap]
 
     def senders(self, acct, ids):
+        """Returns the From header of each message in `ids`."""
         g = self._gmail(acct).users()
         out = []
         for mid in ids:
@@ -209,7 +245,10 @@ class RealBackend:
         return out
 
     def relabel(self, acct, ids, add=(), remove=()):
-        """Bulk label change (1000 per call). Used for Trash / Inbox / Spam moves only."""
+        """Adds/removes labels on many messages (1,000 per call).
+
+        Used only for Trash, Inbox and Spam moves by cleanup and its undo.
+        """
         g = self._gmail(acct).users()
         for i in range(0, len(ids), 1000):
             g.messages().batchModify(
@@ -222,21 +261,27 @@ class RealBackend:
             ).execute()
 
     def save_draft(self, item, body):
+        """Creates or updates a reply draft; never sends."""
         return actions.save_draft(
             item, body
         )  # creates/updates a draft; never sends
 
     def delete_draft(self, item):
+        """Deletes a reply draft if it still exists."""
         actions.delete_draft(item)
 
     def cal_add(self, item):
+        """Adds a pending event to the calendar (see actions.add_event)."""
         return actions.add_event(item)
 
     def cal_list(self, days):
+        """Lists calendar events for the next `days` days."""
         return actions.upcoming(days)
 
     def notion_api(self, method, path, body=None, version=notion.VERSION):
+        """Calls the Notion API with the host's integration key."""
         return _REAL_NOTION_API(method, path, body, version=version)
 
     def config(self):
+        """Returns the user's config (data/config.json)."""
         return CONFIG

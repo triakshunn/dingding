@@ -1,11 +1,12 @@
-"""Trackers: bills & subscriptions, waiting-for-a-reply, flights (+ check-in alerts), flight price watches.
+"""Trackers: bills, waiting-for-a-reply, flights and flight price watches.
 
-Everything here runs on the host inside the broker. No ChatGPT/Codex quota is used:
-  * the LOCAL model only extracts facts (merchant/amount/date, flight number/time) from already-filtered email,
-    in the background lane, so it yields to the user's requests;
-  * check-in and price alerts go straight to the user's Telegram chat as plain messages (no model run);
-  * facts from sensitive emails leave the laptop only as "🔒 private <kind> due <date>".
-State lives in <broker cache>/trackers/ (mode 0700/0600).
+Everything here runs on the host inside the broker and uses no ChatGPT/Codex
+quota: the local model only extracts facts (merchant, amount, date, flight
+number, time) from already-filtered email, in the background lane, so it yields
+to the user's requests; check-in and price alerts go to the user's Telegram chat
+as plain messages (no model run); facts from sensitive emails leave the host
+only as "🔒 private <kind> due <date>". State lives in <broker cache>/trackers/
+(mode 0700/0600).
 """
 
 import datetime as dt
@@ -41,16 +42,19 @@ DROP_ALERT = 0.05  # alert when the lowest price beats the previous low by 5 %+
 
 CANDIDATE = re.compile(
     r"receipt|invoice|payment|bill\b|billing|due\b|subscription|renew|trial|membership|charged|statement|autopay|"
-    r"itinerary|flight|boarding|check-in|check in|e-ticket|eticket|booking|reservation|PNR|departure|airline",
+    r"itinerary|flight|boarding|check-in|check"
+    r" in|e-ticket|eticket|booking|reservation|PNR|departure|airline",
     re.I,
 )
 STRONG_SUBJECT = re.compile(
-    r"receipt|invoice|order confirm|your order|payment|renew|trial|subscription|bill\b|"
+    r"receipt|invoice|order confirm|your"
+    r" order|payment|renew|trial|subscription|bill\b|"
     r"statement|itinerary|boarding|check-in|e-?ticket|booking|reservation|flight",
     re.I,
 )
 ASKS = re.compile(
-    r"\?|let me know|could you|can you|would you|please|available|when can|any update",
+    r"\?|let me know|could you|can you|would you|please|available|when can|any"
+    r" update",
     re.I,
 )
 AUTOMATED = re.compile(
@@ -95,20 +99,8 @@ AIRLINE_CODES = {
     "british airways": "BA",
 }
 
-EXTRACT_SYSTEM = """You read ONE email and list the money and travel facts in it (text is privacy-filtered; keep [PLACEHOLDERS]).
-
-bills: one entry for EACH of these that the email states:
-  - "receipt": a purchase/order that was paid (order confirmations, receipts, "you paid", "Total: $X").
-  - "bill": an amount the reader owes by a due date (statement, invoice, payment due).
-  - "subscription": a recurring charge or renewal (membership renews, monthly plan charged).
-  - "trial": a free trial that ends on a date.
-  merchant = the company the money went to (for delivery apps use the restaurant/store, e.g. "Taco Bell via DoorDash").
-  amount = the number (0 if not stated). currency = "USD" unless stated otherwise.
-  date = YYYY-MM-DD (due date, renewal date, trial end, or the purchase date = the email date for receipts).
-  cadence = monthly | yearly | weekly | once | unknown.
-flights: each flight segment in a booking, itinerary or check-in email: airline, flight_number ("DL 1234"),
-  from/to as 3-letter airport codes, depart_local/arrive_local as YYYY-MM-DDTHH:MM local time.
-Newsletters, ads and promotions have no facts: return empty lists for them. Don't invent anything."""
+_PROMPTS = Path(__file__).resolve().parent / "prompts"  # prompt texts
+EXTRACT_SYSTEM = (_PROMPTS / "extract.txt").read_text()
 
 EXTRACT_SCHEMA = {
     "type": "object",
@@ -186,6 +178,7 @@ def _airports():
 
 
 def airline_code(airline, flight_number):
+    """Returns the 2-letter airline code from a flight number or name."""
     m = re.match(r"\s*([A-Z0-9]{2})\s*\d", (flight_number or "").upper())
     if m:
         return m.group(1)
@@ -196,7 +189,13 @@ def airline_code(airline, flight_number):
 
 
 def extract_facts(subject, body, date):
-    """One local-model call (background lane). Raises PreemptedError when a user request needs the model."""
+    """Extracts bill and flight facts from one filtered email (local model).
+
+    Runs in the background lane.
+
+    Raises:
+        PreemptedError: A user request needed the model; the job is retried.
+    """
     return privacy_model.call(
         EXTRACT_SYSTEM,
         f"Email date: {date}\nSubject: {subject}\n\n{body[:3000]}",
@@ -205,7 +204,7 @@ def extract_facts(subject, body, date):
 
 
 def telegram(text):
-    """Plain Telegram message to the owner via the bot token on the host (no model run)."""
+    """Sends a plain Telegram message to the owner (no model run)."""
     spec = importlib.util.spec_from_file_location(
         "watchdog", Path(__file__).resolve().parents[1] / "ops/watchdog.py"
     )
@@ -259,6 +258,12 @@ def _public_watch(w):
 
 
 def parse_price(data):
+    """Summarizes a SerpApi Google Flights answer.
+
+    Returns:
+        {"lowest", "level", "typical", "best"}, where best has price, airline,
+            stops, departs and duration_min of the cheapest option.
+    """
     options = (data.get("best_flights") or []) + (
         data.get("other_flights") or []
     )
@@ -278,15 +283,26 @@ def parse_price(data):
                 dict.fromkeys(leg.get("airline", "") for leg in legs)
             ),
             "stops": max(0, len(legs) - 1),
-            "departs": (legs[0].get("departure_airport") or {}).get("time")
-            if legs
-            else None,
+            "departs": (
+                (legs[0].get("departure_airport") or {}).get("time")
+                if legs
+                else None
+            ),
             "duration_min": best.get("total_duration"),
         }
     return out
 
 
 class Trackers:
+    """The user's trackers, kept in the broker's cache directory.
+
+    Attributes:
+        br: The broker (for mail records, the queue and the backend).
+        notify: Sends a Telegram message (replaced in tests).
+        now: Returns the current time in the user's timezone (replaced in
+            tests).
+    """
+
     def __init__(
         self, broker, notify=telegram, now=lambda: dt.datetime.now(TZ)
     ):
@@ -314,7 +330,11 @@ class Trackers:
 
     # ---------- bills & flights from email (background) ----------
     def scan(self):
-        """Queue extraction for recent cached emails that look like bills/flights (background lane, priority 4)."""
+        """Queues fact extraction for recent emails about money or travel.
+
+        Runs in the background lane every 30 minutes. Emails without money or
+        travel keywords are recorded as having no facts, without a model call.
+        """
         known = set(self._load("facts", {}))
         cutoff = time.time() - SCAN_DAYS * 86400
         nothing, todo = [], []
@@ -323,8 +343,8 @@ class Trackers:
             if ref in known or f.stat().st_mtime < cutoff:
                 continue
             flt = json.loads(f.read_text())["filter"]
-            text = f"{flt.get('redacted_subject', '')}\n{flt.get('redacted_body', '')}"
             subject = flt.get("redacted_subject", "")
+            text = f"{subject}\n{flt.get('redacted_body', '')}"
             likely = CANDIDATE.search(text) and (
                 flt.get("bucket") != "skip" or STRONG_SUBJECT.search(subject)
             )
@@ -342,6 +362,15 @@ class Trackers:
                 self.br.submit(4, self.extract, ref)
 
     def extract(self, ref):
+        """Extracts and stores the facts of one email (background job).
+
+        A model failure is recorded as "no facts" so the email isn't retried
+        forever.
+
+        Raises:
+            PreemptedError: A user request needed the model; the broker
+                re-queues.
+        """
         acct, mid = ref.split(":", 1)
         rec = self.br.mail_record(acct, mid)
         flt, msg = rec["filter"], rec["msg"]
@@ -390,6 +419,15 @@ class Trackers:
         return list(rows.values())
 
     def bills(self, days=UPCOMING_DAYS):
+        """Returns upcoming bills/renewals/trials and the latest subscriptions.
+
+        Args:
+            days: How far ahead counts as upcoming.
+
+        Returns:
+            {"upcoming": [...], "subscriptions": [...]}; entries from sensitive
+                emails only carry kind, date and "private".
+        """
         today = self.now().date()
         rows = [b for b in self._all("bills") if _date(b.get("date"))]
         upcoming = sorted(
@@ -430,6 +468,12 @@ class Trackers:
         return local.replace(tzinfo=ZoneInfo(tz)).astimezone(dt.UTC)
 
     def flights(self, days=60):
+        """Returns upcoming flights with check-in opening time and link.
+
+        Args:
+            days: How far ahead to look (flights up to 6 h past departure are
+                kept).
+        """
         now = self.now().astimezone(dt.UTC)
         out = []
         for f in self._all("flights"):
@@ -466,7 +510,7 @@ class Trackers:
         return sorted(out, key=lambda f: f["checkin_opens"])
 
     def checkin_alerts(self):
-        """Send one Telegram message per flight when check-in opens (runs every few minutes, no model)."""
+        """Sends one Telegram alert per flight once its check-in opens."""
         sent = set(self._load("alerted", []))
         now = self.now()
         for f in self.flights(days=3):
@@ -475,14 +519,23 @@ class Trackers:
                 continue
             dep = dt.datetime.fromisoformat(f["depart_local"][:16])
             self.notify(
-                f"✈️ Check-in is open: {f['airline']} {f['flight_number']} · {f['from']} → {f['to']} · "
-                f"{dep:%a %b %-d, %-I:%M %p} (local)\nCheck in: {f['checkin_url']}"
+                f"✈️ Check-in is open: {f['airline']} {f['flight_number']} ·"
+                f" {f['from']} → {f['to']} ·"
+                f" {dep:%a %b %-d, %-I:%M %p} (local)\nCheck in:"
+                f" {f['checkin_url']}"
             )
             sent.add(f["id"])
             self._save("alerted", sorted(sent))
 
-    # ---------- waiting for a reply (background, no model needed for the check itself) ----------
+    # ---------- waiting for a reply (background, no model needed for the check
+    # itself) ----------
     def scan_waiting(self):
+        """Finds sent emails still waiting for a reply (runs every 6 hours).
+
+        A thread counts when its last message is the user's, it is at least
+        WAIT_DAYS calendar days old, it went to at most WAIT_MAX_RECIPIENTS
+        non-automated recipients, and the user's text asks something.
+        """
         now = self.now()
         waiting = []
         for acct in self.br.b.accounts():
@@ -524,12 +577,16 @@ class Trackers:
                     {
                         "id": _hid("wait", acct, t["thread_id"]),
                         "ref": f"{acct}:{last['id']}",
-                        "to": "🔒 (sensitive)"
-                        if rec["filter"].get("sensitive")
-                        else name,
-                        "subject": ""
-                        if rec["filter"].get("sensitive")
-                        else rec["filter"].get("redacted_subject", ""),
+                        "to": (
+                            "🔒 (sensitive)"
+                            if rec["filter"].get("sensitive")
+                            else name
+                        ),
+                        "subject": (
+                            ""
+                            if rec["filter"].get("sensitive")
+                            else rec["filter"].get("redacted_subject", "")
+                        ),
                         "sent": when.date().isoformat(),
                         "days": days,
                     }
@@ -544,6 +601,7 @@ class Trackers:
         )
 
     def waiting(self):
+        """Returns the waiting-for-a-reply list without dismissed items."""
         dismissed = set(self._load("dismissed", []))
         return [
             w for w in self._load("waiting", []) if w["id"] not in dismissed
@@ -560,6 +618,18 @@ class Trackers:
         return p.read_text().strip() if p.exists() else ""
 
     def watch_add(self, a):
+        """Adds (or replaces) a flight price watch.
+
+        Args:
+            a: {"from", "to", "depart", "return"?, "max_price"?} with IATA codes
+                and YYYY-MM-DD dates.
+
+        Returns:
+            The new watch's id and public view, plus a note.
+
+        Raises:
+            ValueError: Missing field, bad airport code or date.
+        """
         for k in ("from", "to", "depart"):
             if not a.get(k):
                 raise ValueError(f"missing {k}")
@@ -587,7 +657,10 @@ class Trackers:
         note = (
             ""
             if self._serpapi_key()
-            else " (no SerpApi key on the laptop yet: checks start once it is added)"
+            else (
+                " (no SerpApi key on the laptop yet: checks start once it is"
+                " added)"
+            )
         )
         return {
             "added": w["id"],
@@ -596,6 +669,11 @@ class Trackers:
         }
 
     def watch_rm(self, wid):
+        """Removes the watch with this id.
+
+        Raises:
+            ValueError: No such watch.
+        """
         watches = self._load("watches", [])
         keep = [w for w in watches if w["id"] != wid]
         if len(keep) == len(watches):
@@ -604,6 +682,7 @@ class Trackers:
         return {"removed": wid}
 
     def watches(self):
+        """Returns all price watches (route, dates, latest and lowest price)."""
         return [_public_watch(w) for w in self._load("watches", [])]
 
     def _budget_ok(self):
@@ -617,6 +696,7 @@ class Trackers:
         self._save("serpapi_usage", usage)
 
     def fetch_price(self, w, key):
+        """Queries SerpApi Google Flights for one watch (uses one search)."""
         q = {
             "engine": "google_flights",
             "departure_id": w["from"],
@@ -634,6 +714,12 @@ class Trackers:
             return json.loads(r.read())
 
     def check_prices(self):
+        """Checks each due watch (about daily) and alerts on price drops.
+
+        Stays within SERPAPI_MONTHLY_CAP searches per month. Alerts when the
+        price beats the previous low by DROP_ALERT or first goes under the
+        watch's max price.
+        """
         key = self._serpapi_key()
         if not key:
             return
@@ -671,7 +757,8 @@ class Trackers:
             ):
                 b = res.get("best") or {}
                 self.notify(
-                    f"📉 Flight price drop: {w['from']} → {w['to']} on {w['depart']}"
+                    f"📉 Flight price drop: {w['from']} → {w['to']} on"
+                    f" {w['depart']}"
                     + (f" (return {w['return']})" if w.get("return") else "")
                     + f": ${low:,.0f}"
                     + (f", was ${min(prev):,.0f}" if prev else "")
@@ -680,9 +767,11 @@ class Trackers:
                         if b
                         else ""
                     )
-                    + "\nGoogle Flights: https://www.google.com/travel/flights?q="
+                    + "\nGoogle Flights:"
+                    " https://www.google.com/travel/flights?q="
                     + urllib.parse.quote(
-                        f"flights from {w['from']} to {w['to']} on {w['depart']}"
+                        f"flights from {w['from']} to {w['to']} on"
+                        f" {w['depart']}"
                         + (
                             f" returning {w['return']}"
                             if w.get("return")
@@ -695,11 +784,13 @@ class Trackers:
 
     # ---------- agent-facing ----------
     def dismiss(self, ids):
+        """Hides tracker items (bills, flights, waiting) by id."""
         d = set(self._load("dismissed", [])) | set(ids)
         self._save("dismissed", sorted(d))
         return {"dismissed": sorted(set(ids))}
 
     def summary(self):
+        """Returns the tracker items a brief should show."""
         b = self.bills()
         return {
             "upcoming_bills": b["upcoming"],
@@ -709,6 +800,7 @@ class Trackers:
         }
 
     def report(self, what=None):
+        """Returns one tracker (bills/waiting/flights/watches) or all."""
         if what == "bills":
             return self.bills(days=30)
         if what == "waiting":
