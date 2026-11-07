@@ -30,11 +30,19 @@ jobs:
       - name: Lint (ruff)
         run: uv run ruff check --ignore D1,D205,E501 .
 
-      - name: Tests with coverage
+      # Each suite runs under coverage; on failure the tail of its output is
+      # posted as an annotation so it is visible without opening the logs.
+      - name: Broker tests
+        run: ./.github/run-suite.sh broker -m unittest discover -s broker/tests
+
+      - name: Privacy tests
+        run: ./.github/run-suite.sh privacy -m pytest -q -p no:cacheprovider privacy/tests
+
+      - name: Ops tests
+        run: ./.github/run-suite.sh ops -m unittest discover -s ops/tests -p "test_*.py"
+
+      - name: Coverage report
         run: |
-          uv run --with coverage==7.6.4 coverage run -m unittest discover -s broker/tests
-          uv run --with coverage==7.6.4 --with pytest coverage run -m pytest -q -p no:cacheprovider privacy/tests
-          uv run --with coverage==7.6.4 coverage run -m unittest discover -s ops/tests -p "test_*.py"
           uv run --with coverage==7.6.4 coverage combine
           uv run --with coverage==7.6.4 coverage report
           uv run --with coverage==7.6.4 coverage xml
