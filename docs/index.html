@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>dingding — a personal inbox assistant</title>
+  <meta name="description" content="dingding is an open-source personal assistant for Gmail, Google Calendar, and Notion with local privacy filtering.">
+  <style>
+    body { font: 1.1rem/1.65 system-ui, sans-serif; color: #172033; background: #f7f9fc; margin: 0; }
+    main { max-width: 760px; margin: 0 auto; padding: 4rem 1.5rem; }
+    h1, h2 { line-height: 1.2; }
+    h1 { font-size: 3rem; margin-bottom: .25rem; }
+    a { color: #1755a2; }
+    .lede { font-size: 1.3rem; }
+    .card { background: white; border: 1px solid #dce3ec; border-radius: 12px; padding: 1.5rem; margin: 1.5rem 0; }
+    footer { border-top: 1px solid #dce3ec; margin-top: 3rem; padding-top: 1rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>dingding</h1>
+  <p class="lede">A personal assistant for Gmail, Google Calendar, and Notion.</p>
+  <div class="card">
+    <h2>What it does</h2>
+    <p>dingding summarizes inbox items, proposes replies as Gmail drafts, suggests calendar events, and helps organize notes. It runs on the owner's computer and communicates through a Telegram bot. It does not send email; the owner sends any draft from Gmail. Calendar additions and edits happen only when the owner asks.</p>
+  </div>
+  <div class="card">
+    <h2>How it handles private data</h2>
+    <p>Google credentials stay on the owner's computer. A local privacy broker removes security codes and filters or redacts sensitive content before the cloud assistant receives it. Some filtered text and summaries are processed by the cloud assistant to answer the owner's requests. The filter reduces exposure but cannot guarantee it catches every private detail.</p>
+    <p><a href="privacy.html">Read the privacy policy</a> for the data flow, storage, and deletion details.</p>
+  </div>
+  <p>The project is open source: <a href="https://github.com/triakshunn/dingding">view code and setup instructions on GitHub</a>.</p>
+  <footer><a href="privacy.html">Privacy policy</a> · <a href="terms.html">Terms</a> · <a href="https://github.com/triakshunn/dingding/issues">Contact via GitHub</a></footer>
+</main>
+</body>
+</html>
