@@ -770,7 +770,7 @@ class Trackers:
         p = Path(
             os.environ.get(
                 "SERPAPI_KEY_FILE",
-                Path.home() / "dingding/data/serpapi_key",
+                Path(__file__).resolve().parents[1] / "data/serpapi_key",
             )
         )
         return p.read_text().strip() if p.exists() else ""
