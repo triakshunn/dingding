@@ -116,13 +116,22 @@ def main():  # noqa: PLR0912, PLR0915  (CLI subcommand dispatcher)
     p.add_argument("--return", dest="ret")
     p.add_argument("--max-price", type=float)
     p.add_argument("--airline", help="IATA airline code, e.g. DL for Delta")
+    p.add_argument("--return-airline", help="IATA codes for return leg")
     p.add_argument("--nonstop", action="store_true")
     p.add_argument("--outbound-time", action="append", dest="outbound_times")
     p.add_argument(
         "--outbound-flight", action="append", dest="outbound_flights"
     )
+    p.add_argument(
+        "--outbound-itinerary", action="append", dest="outbound_itineraries"
+    )
     p.add_argument("--return-time", action="append", dest="return_times")
+    p.add_argument(
+        "--return-itinerary", action="append", dest="return_itineraries"
+    )
     p.add_argument("--return-any-time", action="store_true")
+    p.add_argument("--return-max-stops", type=int, choices=[0, 1, 2])
+    p.add_argument("--return-any-stops", action="store_true")
     p.add_argument("--reference-price", type=float)
     a = ap.parse_args()
 
@@ -238,11 +247,16 @@ def main():  # noqa: PLR0912, PLR0915  (CLI subcommand dispatcher)
                         "return": a.ret,
                         "max_price": a.max_price,
                         "airline": a.airline,
+                        "return_airline": a.return_airline,
                         "nonstop": a.nonstop,
                         "outbound_times": a.outbound_times,
                         "outbound_flights": a.outbound_flights,
+                        "outbound_itineraries": a.outbound_itineraries,
                         "return_times": a.return_times,
+                        "return_itineraries": a.return_itineraries,
                         "return_any_time": a.return_any_time,
+                        "return_max_stops": a.return_max_stops,
+                        "return_any_stops": a.return_any_stops,
                         "reference_price": a.reference_price,
                     },
                 )

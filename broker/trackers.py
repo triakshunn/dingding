@@ -12,6 +12,7 @@ only as "🔒 private <kind> due <date>". State lives in <broker cache>/trackers
 import datetime as dt
 import hashlib
 import importlib.util
+import itertools
 import json
 import math
 import os
@@ -258,12 +259,19 @@ def _public_watch(w):
         "max_price": w.get("max_price"),
         "mode": "exact" if w.get("outbound_flights") else "route",
         "airline": w.get("airline"),
+        "return_airline": w.get("return_airline") or w.get("airline"),
         "nonstop": bool(w.get("nonstop")),
         "outbound_times": w.get("outbound_times"),
         "outbound_flights": w.get("outbound_flights"),
+        "outbound_via": w.get("outbound_via"),
         "return_times": w.get("return_times"),
+        "return_flights": w.get("return_flights"),
+        "return_via": w.get("return_via"),
+        "return_max_stops": w.get("return_max_stops"),
         "return_any_time": bool(
-            w.get("outbound_flights") and not w.get("return_times")
+            w.get("outbound_flights")
+            and not w.get("return_times")
+            and not w.get("return_flights")
         ),
         "reference_price": w.get("reference_price"),
         "latest": last,
@@ -364,6 +372,12 @@ def _matching_options(
             continue
         if not legs and any((airline, nonstop, frm, to, date)):
             continue
+        if any(
+            (left.get("arrival_airport") or {}).get("id")
+            != (right.get("departure_airport") or {}).get("id")
+            for left, right in itertools.pairwise(legs)
+        ):
+            continue
         if nonstop and len(legs) != 1:
             continue
         if frm and (legs[0].get("departure_airport") or {}).get("id") != frm:
@@ -376,7 +390,7 @@ def _matching_options(
             continue
         if airline and any(
             airline_code(leg.get("airline"), leg.get("flight_number"))
-            != airline
+            not in airline.split(",")
             for leg in legs
         ):
             continue
@@ -425,11 +439,25 @@ def parse_price(
 
 
 def _flight_number(option):
-    """Normalised number of a nonstop option, e.g. DL 123 -> DL123."""
+    """Ordered segment numbers, e.g. DL 123 + DL 456 -> DL123+DL456."""
     legs = option.get("flights") or []
-    if len(legs) != 1:
+    if not legs:
         return ""
-    return re.sub(r"\s+", "", legs[0].get("flight_number") or "").upper()
+    numbers = [
+        re.sub(r"\s+", "", leg.get("flight_number") or "").upper()
+        for leg in legs
+    ]
+    if any(not re.fullmatch(r"[A-Z0-9]{2}\d{1,4}", n) for n in numbers):
+        return ""
+    return "+".join(numbers)
+
+
+def _via_airports(option):
+    """Return the ordered connection airports for one itinerary."""
+    return [
+        (leg.get("arrival_airport") or {}).get("id")
+        for leg in (option.get("flights") or [])[:-1]
+    ]
 
 
 def _flight_time(option):
@@ -449,6 +477,43 @@ def _watch_times(values, label):
     ):
         raise ValueError(f"{label} must contain 24-hour HH:MM times")
     return times
+
+
+def _watch_itineraries(values, airline, label):
+    """Validate and normalise comma-separated ordered flight numbers."""
+    if any(not isinstance(raw, str) for raw in values):
+        raise ValueError(f"{label} must be flight numbers")
+    itineraries = [
+        "+".join(
+            re.sub(r"\s+", "", segment).upper()
+            for segment in re.split(r"[,+]", raw)
+        )
+        for raw in values
+    ]
+    if any(
+        not re.fullmatch(r"[A-Z0-9]{2}\d{1,4}", segment)
+        or segment[:2] not in airline.split(",")
+        for itinerary in itineraries
+        for segment in itinerary.split("+")
+    ):
+        raise ValueError(
+            f"{label} must use the airline code for every segment, "
+            "e.g. DL123,DL456"
+        )
+    return itineraries
+
+
+def _watch_airlines(value, label):
+    """Normalise one or more comma-separated IATA carrier codes."""
+    raw = str(value or "").upper().replace(" ", "")
+    if raw == "DELTA":
+        raw = "DL"
+    if not raw:
+        return None
+    codes = list(dict.fromkeys(raw.split(",")))
+    if any(not re.fullmatch(r"[A-Z0-9]{2}", code) for code in codes):
+        raise ValueError(f"{label} must be IATA codes, e.g. DL or DL,UA")
+    return ",".join(codes)
 
 
 class Trackers:
@@ -804,11 +869,12 @@ class Trackers:
             raise ValueError("return must be after depart")
         if _date(a["depart"]) < self.now().date():
             raise ValueError("departure date is in the past")
-        airline = str(a.get("airline") or "").strip().upper() or None
-        if airline == "DELTA":
-            airline = "DL"
-        if airline and not re.fullmatch(r"[A-Z0-9]{2}", airline):
-            raise ValueError("airline must be a 2-character IATA code, e.g. DL")
+        airline = _watch_airlines(a.get("airline"), "airline")
+        return_airline = _watch_airlines(
+            a.get("return_airline"), "return_airline"
+        )
+        if return_airline and not a.get("return"):
+            raise ValueError("return_airline needs a return date")
         nonstop = a.get("nonstop", False)
         if not isinstance(nonstop, bool):
             raise ValueError("nonstop must be true or false")
@@ -827,7 +893,11 @@ class Trackers:
                 to,
                 a["depart"],
                 a.get("return"),
-                *([airline, nonstop] if airline or nonstop else []),
+                *(
+                    [airline, nonstop, return_airline]
+                    if return_airline
+                    else ([airline, nonstop] if airline or nonstop else [])
+                ),
             ),
             "from": frm,
             "to": to,
@@ -835,6 +905,7 @@ class Trackers:
             "return": a.get("return"),
             "max_price": max_price,
             "airline": airline,
+            "return_airline": return_airline,
             "nonstop": nonstop,
             "created": self.now().isoformat(timespec="minutes"),
             "history": [],
@@ -866,46 +937,98 @@ class Trackers:
     def watch_exact_add(self, a):  # noqa: PLR0912, PLR0915  (validation and fare resolution)
         """Resolve specified outbound flights and save a checked itinerary.
 
-        Each outbound option has a fixed flight number. The return is either
-        any matching flight on the return date or one of the requested times.
+        Each outbound option has a fixed sequence of flight numbers. The
+        return is filtered by date, airline, times and allowed stops.
         No watch is saved if any requested outbound cannot be identified or
         has no matching return fare.
         """
         if not a.get("return"):
             raise ValueError("exact itinerary needs a return date")
         w = self._new_watch(a)
+        w["exact"] = True
         if not w["airline"]:
             raise ValueError(
                 "which airline? Give its 2-character code, e.g. DL"
             )
-        if not w["nonstop"]:
-            raise ValueError("specify --nonstop for a nonstop itinerary")
+        return_carrier = w["return_airline"] or w["airline"]
         raw_times = a.get("outbound_times") or []
         raw_numbers = a.get("outbound_flights") or []
-        if bool(raw_times) == bool(raw_numbers):
+        raw_itineraries = a.get("outbound_itineraries") or []
+        if sum(bool(x) for x in (raw_times, raw_numbers, raw_itineraries)) != 1:
             raise ValueError(
-                "give outbound time(s) or flight number(s), but not both"
+                "give outbound time(s), flight number(s), or full "
+                "itinerary segment numbers"
+            )
+        if not w["nonstop"] and not raw_itineraries:
+            raise ValueError(
+                "for a connecting outbound use --outbound-itinerary "
+                "DL123,DL456 with every segment number"
             )
         times = _watch_times(raw_times, "outbound_times") if raw_times else []
-        numbers = [re.sub(r"\s+", "", str(n)).upper() for n in raw_numbers]
-        if numbers and any(
-            not re.fullmatch(r"[A-Z0-9]{2}\d{1,4}", n)
-            or not n.startswith(w["airline"])
-            for n in numbers
+        numbers = _watch_itineraries(
+            raw_numbers, w["airline"], "outbound flights"
+        )
+        itineraries = _watch_itineraries(
+            raw_itineraries, w["airline"], "outbound itineraries"
+        )
+        if w["nonstop"] and any(
+            "+" in itinerary for itinerary in numbers + itineraries
         ):
-            raise ValueError(
-                "outbound flight numbers must use the airline code, e.g. DL123"
-            )
-        specs = times or numbers
+            raise ValueError("remove --nonstop for a connecting outbound")
+        specs = times or numbers or itineraries
         if len(specs) > MAX_EXACT_OUTBOUND:
             raise ValueError("use at most four outbound options per watch")
+        return_max_stops = a.get("return_max_stops")
+        return_any_stops = a.get("return_any_stops", False)
+        raw_return_itineraries = a.get("return_itineraries") or []
+        return_itineraries = _watch_itineraries(
+            raw_return_itineraries, return_carrier, "return itineraries"
+        )
+        if len(return_itineraries) > MAX_EXACT_OUTBOUND:
+            raise ValueError("use at most four return options per watch")
+        if w["nonstop"] and any(
+            "+" in itinerary for itinerary in return_itineraries
+        ):
+            raise ValueError("remove --nonstop for a connecting return")
+        if return_itineraries:
+            if return_max_stops is not None or return_any_stops:
+                raise ValueError(
+                    "return flight numbers already specify the stop pattern"
+                )
+            return_max_stops = 0 if w["nonstop"] else None
+        elif w["nonstop"]:
+            if return_max_stops is not None or return_any_stops:
+                raise ValueError("--nonstop already requires a nonstop return")
+            return_max_stops = 0
+        elif (
+            not isinstance(return_any_stops, bool)
+            or (return_max_stops is None) != return_any_stops
+            or (
+                return_max_stops is not None
+                and (
+                    isinstance(return_max_stops, bool)
+                    or return_max_stops not in (0, 1, 2)
+                )
+            )
+        ):
+            raise ValueError(
+                "choose --return-max-stops 0|1|2 or --return-any-stops"
+            )
+        w["return_max_stops"] = return_max_stops
         return_any = a.get("return_any_time", False)
         raw_return_times = a.get("return_times") or []
-        if (
+        if return_itineraries:
+            if return_any or raw_return_times:
+                raise ValueError(
+                    "return itinerary numbers already specify the return flight"
+                )
+        elif (
             not isinstance(return_any, bool)
             or bool(raw_return_times) == return_any
         ):
-            raise ValueError("choose --return-any-time or return time(s)")
+            raise ValueError(
+                "choose --return-any-time, return time(s), or return itinerary"
+            )
         return_times = (
             _watch_times(raw_return_times, "return_times")
             if raw_return_times
@@ -934,7 +1057,7 @@ class Trackers:
         outbound = _matching_options(
             data,
             airline=w["airline"],
-            nonstop=True,
+            nonstop=w["nonstop"],
             frm=w["from"],
             to=w["to"],
             date=w["depart"],
@@ -955,12 +1078,17 @@ class Trackers:
                 available = (
                     ", ".join(
                         f"{_flight_time(o)} {_flight_number(o)}"
+                        + (
+                            f" via {','.join(_via_airports(o))}"
+                            if _via_airports(o)
+                            else ""
+                        )
                         for o in outbound[:8]
                     )
                     or "none"
                 )
                 raise ValueError(
-                    f"could not identify one {w['airline']} nonstop "
+                    f"could not identify one {w['airline']} "
                     f"outbound for {spec}; "
                     f"available: {available}. Ask which flight to track."
                 )
@@ -969,6 +1097,8 @@ class Trackers:
             raise ValueError("outbound options must name different flights")
 
         results = []
+        return_paths = {}
+        resolved_returns = set(return_itineraries)
         for option in selected:
             token = option.get("departure_token")
             if not token:
@@ -984,16 +1114,56 @@ class Trackers:
                 )
             choices = _matching_options(
                 returns,
-                airline=w["airline"],
-                nonstop=True,
+                airline=return_carrier,
+                nonstop=return_max_stops == 0,
                 frm=w["to"],
                 to=w["from"],
                 date=w["return"],
             )
-            if return_times:
+            if return_max_stops is not None:
                 choices = [
-                    o for o in choices if _flight_time(o) in return_times
+                    o
+                    for o in choices
+                    if len(o.get("flights") or []) - 1 <= return_max_stops
                 ]
+            if return_times:
+                timed = []
+                for at in return_times:
+                    same_time = [o for o in choices if _flight_time(o) == at]
+                    unique = {_flight_number(o) for o in same_time}
+                    if len(unique) != 1 or "" in unique:
+                        available = (
+                            ", ".join(
+                                f"{_flight_time(o)} {_flight_number(o)}"
+                                for o in choices[:8]
+                            )
+                            or "none"
+                        )
+                        raise ValueError(
+                            f"return time {at} is missing or ambiguous for "
+                            f"{_flight_number(option)}; available: {available}"
+                        )
+                    timed.extend(same_time)
+                    number = next(iter(unique))
+                    resolved_returns.add(number)
+                    return_paths[number] = _via_airports(same_time[0])
+                choices = sorted(timed, key=lambda o: o["price"])
+            if return_itineraries:
+                choices = [
+                    o
+                    for o in choices
+                    if _flight_number(o) in return_itineraries
+                ]
+                found = {_flight_number(o) for o in choices}
+                if found != set(return_itineraries):
+                    missing = ", ".join(sorted(set(return_itineraries) - found))
+                    raise ValueError(
+                        f"return flight(s) {missing} not found for "
+                        f"{_flight_number(option)} on {w['return']}"
+                    )
+                return_paths.update(
+                    {_flight_number(o): _via_airports(o) for o in choices}
+                )
             if not choices:
                 raise ValueError(
                     f"no matching return fare for {_flight_number(option)} "
@@ -1008,22 +1178,32 @@ class Trackers:
             w["depart"],
             w["return"],
             *sorted(_flight_number(o) for o in selected),
+            *([w["airline"]] if "," in w["airline"] else []),
+            *([return_carrier] if w["return_airline"] else []),
+            *sorted(resolved_returns),
             *return_times,
+            *([return_max_stops] if return_max_stops != 0 else []),
         )
         w["outbound_flights"] = [_flight_number(o) for o in selected]
         w["outbound_times"] = [_flight_time(o) for o in selected]
+        w["outbound_via"] = [_via_airports(o) for o in selected]
         w["return_times"] = return_times or None
+        w["return_flights"] = sorted(resolved_returns) or None
+        w["return_via"] = return_paths or None
         w["reference_price"] = reference
         best = min(results, key=lambda pair: pair[1]["price"])
         initial = parse_price(
             {"best_flights": [best[1]]},
-            airline=w["airline"],
-            nonstop=True,
+            airline=return_carrier,
+            nonstop=return_max_stops == 0,
             frm=w["to"],
             to=w["from"],
             date=w["return"],
         )
         initial["best"]["outbound_flight"] = _flight_number(best[0])
+        initial["best"]["outbound_via"] = _via_airports(best[0])
+        initial["best"]["return_flight"] = _flight_number(best[1])
+        initial["best"]["return_via"] = _via_airports(best[1])
         w["history"] = [
             {"at": self.now().isoformat(timespec="minutes"), **initial}
         ]
@@ -1077,10 +1257,23 @@ class Trackers:
         }
         if w.get("return"):
             q["return_date"] = w["return"]
-        if w.get("airline"):
-            q["include_airlines"] = w["airline"]
-        if w.get("nonstop"):
-            q["stops"] = "1"
+        if w.get("exact") or w.get("outbound_flights"):
+            q["show_hidden"] = "true"
+            q["deep_search"] = "true"
+        carriers = (
+            w.get("return_airline") or w.get("airline")
+            if departure_token
+            else w.get("airline")
+        )
+        if carriers:
+            q["include_airlines"] = carriers
+        max_stops = (
+            w.get("return_max_stops", 0 if w.get("nonstop") else None)
+            if departure_token
+            else (0 if w.get("nonstop") else None)
+        )
+        if max_stops is not None:
+            q["stops"] = str(max_stops + 1)
         if departure_token:
             q["departure_token"] = departure_token
         return _serpapi(q)
@@ -1169,7 +1362,11 @@ class Trackers:
             self._spend()
             try:
                 data = self.fetch_price(w, key)
-                filtered = bool(w.get("airline") or w.get("nonstop"))
+                filtered = bool(
+                    w.get("airline")
+                    or w.get("nonstop")
+                    or w.get("return_airline")
+                )
                 if filtered and w.get("return"):
                     outbound = _matching_options(
                         data,
@@ -1181,10 +1378,22 @@ class Trackers:
                     )
                     exact_flights = set(w.get("outbound_flights") or [])
                     if exact_flights:
+                        exact_via = dict(
+                            zip(
+                                w["outbound_flights"],
+                                w.get("outbound_via") or [],
+                                strict=False,
+                            )
+                        )
                         outbound = [
                             o
                             for o in outbound
                             if _flight_number(o) in exact_flights
+                            and (
+                                _flight_number(o) not in exact_via
+                                or _via_airports(o)
+                                == exact_via[_flight_number(o)]
+                            )
                         ]
                     res = {"lowest": None}
                     seen_tokens = set()
@@ -1207,24 +1416,47 @@ class Trackers:
                         seen_flights.add(number)
                         self._spend()
                         returns = self.fetch_price(w, key, token)
+                        return_max_stops = w.get(
+                            "return_max_stops", 0 if w.get("nonstop") else None
+                        )
                         choices = _matching_options(
                             returns,
-                            airline=w.get("airline"),
-                            nonstop=w.get("nonstop"),
+                            airline=w.get("return_airline") or w.get("airline"),
+                            nonstop=return_max_stops == 0,
                             frm=w["to"],
                             to=w["from"],
                             date=w["return"],
                         )
+                        if return_max_stops is not None:
+                            choices = [
+                                o
+                                for o in choices
+                                if len(o.get("flights") or []) - 1
+                                <= return_max_stops
+                            ]
                         if w.get("return_times"):
                             choices = [
                                 o
                                 for o in choices
                                 if _flight_time(o) in w["return_times"]
                             ]
+                        if w.get("return_flights"):
+                            return_ids = set(w["return_flights"])
+                            return_via = w.get("return_via") or {}
+                            choices = [
+                                o
+                                for o in choices
+                                if _flight_number(o) in return_ids
+                                and (
+                                    _flight_number(o) not in return_via
+                                    or _via_airports(o)
+                                    == return_via[_flight_number(o)]
+                                )
+                            ]
                         result = parse_price(
                             {"best_flights": choices[:1]},
-                            airline=w.get("airline"),
-                            nonstop=w.get("nonstop"),
+                            airline=w.get("return_airline") or w.get("airline"),
+                            nonstop=return_max_stops == 0,
                             frm=w["to"],
                             to=w["from"],
                             date=w["return"],
@@ -1236,6 +1468,15 @@ class Trackers:
                             result["best"]["outbound_flight"] = number
                             result["best"]["outbound_time"] = _flight_time(
                                 candidate
+                            )
+                            result["best"]["outbound_via"] = _via_airports(
+                                candidate
+                            )
+                            result["best"]["return_flight"] = _flight_number(
+                                choices[0]
+                            )
+                            result["best"]["return_via"] = _via_airports(
+                                choices[0]
                             )
                             res = result
                 else:
@@ -1301,7 +1542,22 @@ class Trackers:
                     + (
                         f"\nOutbound: {b.get('outbound_flight')} at "
                         f"{outbound_time}"
+                        + (
+                            f" via {', '.join(b['outbound_via'])}"
+                            if b.get("outbound_via")
+                            else ""
+                        )
                         if exact
+                        else ""
+                    )
+                    + (
+                        f"\nReturn: {b.get('return_flight')}"
+                        + (
+                            f" via {', '.join(b['return_via'])}"
+                            if b.get("return_via")
+                            else ""
+                        )
+                        if exact and w.get("return_flights")
                         else ""
                     )
                     + (
