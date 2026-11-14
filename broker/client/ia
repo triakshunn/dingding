@@ -1,86 +1,131 @@
 #!/usr/bin/env python3
-"""`ia` — email & calendar commands (container side). Same commands as before; everything goes through the
-privacy broker on the laptop, which filters what you can read. You cannot send email.
+"""Email and calendar commands through the laptop's privacy broker.
 
-  ia brief [--morning|--midday|--evening] [--peek]   everything a brief needs in ONE call (new mail, calendar, pending)
-  ia accounts | ia new [--peek] [--max 40] | ia search "<gmail query>" [--account A] [--max 5]
-  ia read <account> <message_id>
-  ia suggest-event --title T --start ISO [--end ISO | --all-day] [--location L] [--source account:id]
-  ia suggest-reply --source account:id [--why "..."]
-  ia pending | ia dismiss N… | ia cal-add N… | ia cal-add-new --title … --start … | ia cal-list [--days 7]
-  ia cal-events [--days 14]                      calendar events WITH ids (for cal-edit)
-  ia cal-edit ID [--title T] [--start ISO] [--end ISO] [--all-day] [--location L]   (only when asked; undoable)
-  ia cal-undo [change_id]                        undo the last calendar edit
-  ia draft N --body "<text>"
-  ia recent [--bucket skip|headsup|event|action|reply|private]     emails shown in recent checks/briefs
-  ia archive <ref|N>… [--bucket B|all [--batch 1]] [--confirmed] [--keep-unread]   (Inbox label only; undoable)
-             --bucket all = every email in that brief/check (batch 1 = latest); preview, then --confirmed
-  ia unarchive [batch_id]                                                  undo the last archive
-  ia cleanup --area promotions|social|updates|forums|spam … [--older-than DAYS] [--action trash|archive]
-             [--account A …]        → preview + plan id (nothing changes yet)
-  ia cleanup --confirm <plan_id>    → carry out exactly that preview (after the user's yes)
-  ia track [bills|waiting|flights|watches]       trackers (bills & subscriptions, waiting for a reply, flights, price watches)
-  ia track dismiss ID…                            hide tracker items that don't matter
-  ia flight-search --leg FROM TO DATES [--leg ...] [--no-carry-on]   live fares now (Google Flights)
-      FROM/TO: IATA codes, alternatives with commas (MHT,BOS); DATES: YYYY-MM-DD[,YYYY-MM-DD...]
-  ia flight-watch add FROM TO YYYY-MM-DD [--return YYYY-MM-DD] [--max-price N] · list · rm ID
-  ia mail-log                        recent archive/cleanup batches  ·  ia undo-mail [batch_id]  undo one
+Only drafts are supported; this client cannot send email. Run `ia --help` or
+read the inbox skill for command usage.
 """
+
 import argparse
-import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from brokerclient import call, out  # noqa: E402
+from brokerclient import call
+from brokerclient import out
+
+FLIGHT_WATCH_ARGC = 3
 
 
-def main():
+def main():  # noqa: PLR0912, PLR0915  (CLI subcommand dispatcher)
     ap = argparse.ArgumentParser(prog="ia")
     sp = ap.add_subparsers(dest="cmd", required=True)
     sp.add_parser("accounts")
-    p = sp.add_parser("brief"); p.add_argument("--peek", action="store_true"); p.add_argument("--max", type=int, default=40)
+    p = sp.add_parser("brief")
+    p.add_argument("--peek", action="store_true")
+    p.add_argument("--max", type=int, default=40)
     g = p.add_mutually_exclusive_group()
     for k in ("morning", "midday", "evening"):
         g.add_argument("--" + k, dest="kind", action="store_const", const=k)
-    p = sp.add_parser("new"); p.add_argument("--peek", action="store_true"); p.add_argument("--max", type=int, default=40)
-    p = sp.add_parser("search"); p.add_argument("query"); p.add_argument("--account"); p.add_argument("--max", type=int, default=5)
-    p = sp.add_parser("read"); p.add_argument("account"); p.add_argument("id")
+    p = sp.add_parser("brief-start")
+    p.add_argument("--max", type=int, default=40)
+    g = p.add_mutually_exclusive_group()
+    for k in ("morning", "midday", "evening"):
+        g.add_argument("--" + k, dest="kind", action="store_const", const=k)
+    p = sp.add_parser("brief-job")
+    p.add_argument("job_id")
+    p = sp.add_parser("brief-ack")
+    p.add_argument("job_id")
+    p = sp.add_parser("new")
+    p.add_argument("--peek", action="store_true")
+    p.add_argument("--max", type=int, default=40)
+    p = sp.add_parser("search")
+    p.add_argument("query")
+    p.add_argument("--account")
+    p.add_argument("--max", type=int, default=5)
+    p = sp.add_parser("read")
+    p.add_argument("account")
+    p.add_argument("id")
     for name in ("suggest-event", "cal-add-new"):
         p = sp.add_parser(name)
-        p.add_argument("--title", required=True); p.add_argument("--start", required=True)
-        p.add_argument("--end"); p.add_argument("--all-day", action="store_true"); p.add_argument("--location")
+        p.add_argument("--title", required=True)
+        p.add_argument("--start", required=True)
+        p.add_argument("--end")
+        p.add_argument("--all-day", action="store_true")
+        p.add_argument("--location")
         if name == "suggest-event":
             p.add_argument("--source")
-    p = sp.add_parser("suggest-reply"); p.add_argument("--source", required=True); p.add_argument("--why", default="")
+    p = sp.add_parser("suggest-reply")
+    p.add_argument("--source", required=True)
+    p.add_argument("--why", default="")
     sp.add_parser("pending")
-    p = sp.add_parser("dismiss"); p.add_argument("n", nargs="+", type=int)
-    p = sp.add_parser("cal-add"); p.add_argument("n", nargs="+", type=int)
-    p = sp.add_parser("cal-list"); p.add_argument("--days", type=int, default=7)
-    p = sp.add_parser("cal-events"); p.add_argument("--days", type=int, default=14)
-    p = sp.add_parser("cal-edit"); p.add_argument("id"); p.add_argument("--title"); p.add_argument("--start")
-    p.add_argument("--end"); p.add_argument("--all-day", action="store_true"); p.add_argument("--location")
-    p = sp.add_parser("cal-undo"); p.add_argument("change_id", nargs="?")
-    p = sp.add_parser("draft"); p.add_argument("n", type=int); p.add_argument("--body", required=True)
-    p = sp.add_parser("recent"); p.add_argument("--bucket")
-    p = sp.add_parser("archive"); p.add_argument("targets", nargs="*")
-    p.add_argument("--bucket"); p.add_argument("--batch", type=int, default=1)
-    p.add_argument("--confirmed", action="store_true"); p.add_argument("--keep-unread", action="store_true")
-    p = sp.add_parser("unarchive"); p.add_argument("batch_id", nargs="?")
-    p = sp.add_parser("undo-mail"); p.add_argument("batch_id", nargs="?")
-    p = sp.add_parser("cleanup"); p.add_argument("--area", action="append", default=[])
-    p.add_argument("--older-than", type=int, default=0); p.add_argument("--action", default="trash")
-    p.add_argument("--account", action="append", default=[]); p.add_argument("--confirm")
+    p = sp.add_parser("dismiss")
+    p.add_argument("n", nargs="+", type=int)
+    p = sp.add_parser("cal-add")
+    p.add_argument("n", nargs="+", type=int)
+    p = sp.add_parser("cal-list")
+    p.add_argument("--days", type=int, default=7)
+    p = sp.add_parser("cal-events")
+    p.add_argument("--days", type=int, default=14)
+    p = sp.add_parser("cal-edit")
+    p.add_argument("id")
+    p.add_argument("--title")
+    p.add_argument("--start")
+    p.add_argument("--end")
+    p.add_argument("--all-day", action="store_true")
+    p.add_argument("--location")
+    p = sp.add_parser("cal-undo")
+    p.add_argument("change_id", nargs="?")
+    p = sp.add_parser("draft")
+    p.add_argument("n", type=int)
+    p.add_argument("--body", required=True)
+    p = sp.add_parser("recent")
+    p.add_argument("--bucket")
+    p = sp.add_parser("archive")
+    p.add_argument("targets", nargs="*")
+    p.add_argument("--bucket")
+    p.add_argument("--batch", type=int, default=1)
+    p.add_argument("--confirmed", action="store_true")
+    p.add_argument("--keep-unread", action="store_true")
+    p = sp.add_parser("unarchive")
+    p.add_argument("batch_id", nargs="?")
+    p = sp.add_parser("undo-mail")
+    p.add_argument("batch_id", nargs="?")
+    p = sp.add_parser("cleanup")
+    p.add_argument("--area", action="append", default=[])
+    p.add_argument("--older-than", type=int, default=0)
+    p.add_argument("--action", default="trash")
+    p.add_argument("--account", action="append", default=[])
+    p.add_argument("--confirm")
     sp.add_parser("mail-log")
-    p = sp.add_parser("track"); p.add_argument("what", nargs="?", choices=["bills", "waiting", "flights", "watches", "dismiss"])
+    p = sp.add_parser("track")
+    p.add_argument(
+        "what",
+        nargs="?",
+        choices=["bills", "waiting", "flights", "watches", "dismiss"],
+    )
     p.add_argument("ids", nargs="*")
     p = sp.add_parser("flight-search")
-    p.add_argument("--leg", nargs=3, action="append", required=True, metavar=("FROM", "TO", "DATES"))
+    p.add_argument(
+        "--leg",
+        nargs=3,
+        action="append",
+        required=True,
+        metavar=("FROM", "TO", "DATES"),
+    )
     p.add_argument("--no-carry-on", action="store_true")
-    p = sp.add_parser("flight-watch"); p.add_argument("action", choices=["add", "list", "rm"]); p.add_argument("args", nargs="*")
-    p.add_argument("--return", dest="ret"); p.add_argument("--max-price", type=float)
+    p = sp.add_parser("flight-watch")
+    p.add_argument("action", choices=["add", "list", "rm"])
+    p.add_argument("args", nargs="*")
+    p.add_argument("--return", dest="ret")
+    p.add_argument("--max-price", type=float)
     a = ap.parse_args()
 
-    ev = lambda: dict(title=a.title, start=a.start, end=a.end, all_day=a.all_day, location=a.location)  # noqa: E731
+    def ev():
+        return {
+            "title": a.title,
+            "start": a.start,
+            "end": a.end,
+            "all_day": a.all_day,
+            "location": a.location,
+        }
+
     if a.cmd == "accounts":
         out(call("accounts"))
     elif a.cmd == "new":
@@ -110,37 +155,80 @@ def main():
     elif a.cmd == "archive":
         if not a.targets and not a.bucket:
             ap.error("archive: give refs/numbers or --bucket")
-        out(call("mail.archive", targets=a.targets, bucket=a.bucket, batch=a.batch,
-                 confirmed=a.confirmed, mark_read=not a.keep_unread))
+        out(
+            call(
+                "mail.archive",
+                targets=a.targets,
+                bucket=a.bucket,
+                batch=a.batch,
+                confirmed=a.confirmed,
+                mark_read=not a.keep_unread,
+            )
+        )
     elif a.cmd == "cleanup":
         if a.confirm:
             out(call("mail.cleanup", confirm=a.confirm))
         else:
-            out(call("mail.cleanup", areas=a.area, older_than_days=a.older_than, action=a.action,
-                     accounts=a.account or None))
+            out(
+                call(
+                    "mail.cleanup",
+                    areas=a.area,
+                    older_than_days=a.older_than,
+                    action=a.action,
+                    accounts=a.account or None,
+                )
+            )
     elif a.cmd == "cal-events":
         out(call("cal.events", days=a.days))
     elif a.cmd == "cal-edit":
-        out(call("cal.edit", id=a.id, title=a.title, start=a.start, end=a.end, all_day=a.all_day,
-                 location=a.location))
+        out(
+            call(
+                "cal.edit",
+                id=a.id,
+                title=a.title,
+                start=a.start,
+                end=a.end,
+                all_day=a.all_day,
+                location=a.location,
+            )
+        )
     elif a.cmd == "cal-undo":
         out(call("cal.undo", change_id=a.change_id))
     elif a.cmd == "brief":
         out(call("brief", kind=a.kind, peek=a.peek, max=a.max))
+    elif a.cmd == "brief-start":
+        job = call("brief.start", kind=a.kind, max=a.max)
+        out(call("brief.wait", job_id=job["job_id"], seconds=55))
+    elif a.cmd == "brief-job":
+        out(call("brief.job", job_id=a.job_id, claim=True))
+    elif a.cmd == "brief-ack":
+        out(call("brief.ack", job_id=a.job_id))
     elif a.cmd == "track":
         if a.what == "dismiss":
             out(call("track.dismiss", ids=a.ids))
         else:
             out(call("track", what=a.what))
     elif a.cmd == "flight-search":
-        legs = [{"from": f, "to": t, "dates": d.split(",")} for f, t, d in a.leg]
+        legs = [
+            {"from": f, "to": t, "dates": d.split(",")} for f, t, d in a.leg
+        ]
         out(call("flight.search", legs=legs, carry_on=not a.no_carry_on))
     elif a.cmd == "flight-watch":
         if a.action == "add":
-            if len(a.args) != 3:
+            if len(a.args) != FLIGHT_WATCH_ARGC:
                 ap.error("flight-watch add FROM TO YYYY-MM-DD")
-            out(call("flight-watch.add", **{"from": a.args[0], "to": a.args[1], "depart": a.args[2],
-                                            "return": a.ret, "max_price": a.max_price}))
+            out(
+                call(
+                    "flight-watch.add",
+                    **{
+                        "from": a.args[0],
+                        "to": a.args[1],
+                        "depart": a.args[2],
+                        "return": a.ret,
+                        "max_price": a.max_price,
+                    },
+                )
+            )
         elif a.action == "rm":
             out(call("flight-watch.rm", id=(a.args or [""])[0]))
         else:

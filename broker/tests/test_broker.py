@@ -1474,6 +1474,238 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(BACKEND.events["ev1"]["start"], {"date": "2030-01-08"})
         self.assertIn("nothing to undo", run("ia", "cal-undo", ok=False))
 
+    def test_26_cold_brief_survives_timeout_and_waits_for_delivery(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-cold-cache")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+        blocked = threading.Event()
+        release = threading.Event()
+        original = br.mail_record
+
+        def slow_record(acct, mid, retry=False):
+            blocked.set()
+            self.assertTrue(release.wait(5))
+            return original(acct, mid, retry)
+
+        br.mail_record = slow_record
+        job_id = br.op_brief_start({"kind": "midday"})["job_id"]
+        self.assertTrue(blocked.wait(2))
+        self.assertEqual(
+            br.op_brief_wait({"job_id": job_id, "seconds": 0.02})["status"],
+            "running",
+        )
+        self.assertFalse((br.cache / "seen.json").exists())
+        self.assertEqual(
+            br.op_brief_start({"kind": "midday"})["job_id"], job_id
+        )
+        release.set()
+        ready = br.op_brief_wait({"job_id": job_id, "seconds": 2})
+        self.assertEqual(ready["status"], "ready")
+        self.assertEqual(ready["result"]["mail"]["count"], 3)
+        self.assertNotIn("_seen_ids", json.dumps(ready))
+        self.assertFalse((br.cache / "seen.json").exists())
+
+        # A broker restart can recover the saved result without a new scan.
+        restarted = server.Broker(FakeBackend(), br.cache)
+        self.assertEqual(
+            restarted.op_brief_job({"job_id": job_id})["status"], "ready"
+        )
+        restarted.op_brief_ack({"job_id": job_id})
+        self.assertEqual(
+            restarted.op_brief_job({"job_id": job_id})["status"],
+            "delivered",
+        )
+        seen = restarted._seen()
+        self.assertEqual(len(seen["personal"]), 2)
+        self.assertEqual(len(seen["school"]), 2)
+        self.assertEqual(
+            len(restarted.op_mail_recent({})["batches"][0]["emails"]), 3
+        )
+        restarted.op_brief_ack({"job_id": job_id})
+        self.assertEqual(len(restarted.op_mail_recent({})["batches"]), 1)
+
+    def test_27_ready_brief_schedules_recovery_until_ack(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-retry-cache")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+        calls = []
+
+        def scheduled(job_id, attempt):
+            calls.append((job_id, attempt))
+            return True
+
+        with (
+            patch.object(server, "BRIEF_RECOVERY_GRACE", 0),
+            patch.object(server, "BRIEF_RETRY_SECONDS", 0.05),
+            patch.object(server, "BRIEF_WATCH_TICK", 0.01),
+            patch.object(server.brief_recovery, "schedule", scheduled),
+            patch.object(server.brief_recovery, "notify"),
+        ):
+            job_id = br.op_brief_start({})["job_id"]
+            ready = br.op_brief_wait({"job_id": job_id, "seconds": 2})
+            self.assertEqual(ready["status"], "ready")
+            deadline = time.monotonic() + 2
+            while len(calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(calls[0], (job_id, 1))
+            self.assertEqual(calls[1], (job_id, 2))
+            br.op_brief_ack({"job_id": job_id})
+            count = len(calls)
+            time.sleep(0.1)
+            self.assertEqual(len(calls), count)
+
+    def test_28_recovery_uses_idempotent_owner_routed_cron(self):
+        recovery = server.brief_recovery
+        with (
+            patch.object(recovery.watchdog, "chat_id", return_value="123"),
+            patch.object(recovery.subprocess, "run") as invoke,
+        ):
+            invoke.return_value.returncode = 0
+            self.assertTrue(recovery.schedule("0123456789abcdef", 2))
+            cmd = invoke.call_args.args[0]
+            self.assertIn("brief-recovery-0123456789abcdef-2", cmd)
+            self.assertIn("--declaration-key", cmd)
+            self.assertEqual(cmd[cmd.index("--to") + 1], "123")
+            self.assertIn("brief-job 0123456789abcdef", " ".join(cmd))
+
+    def test_29_brief_client_and_recovery_after_restart(self):
+        first = run("ia", "brief-start", "--evening")
+        self.assertEqual(first["status"], "ready")
+        job_id = first["job_id"]
+        self.assertEqual(run("ia", "brief-job", job_id)["status"], "delivering")
+        self.assertTrue(run("ia", "brief-ack", job_id)["delivered"])
+
+        br = server.Broker(FakeBackend(), TMP / "brief-restart-cache")
+        job_id = "0123456789abcdef"
+        created = time.time()
+        br._brief_save(
+            {
+                "id": job_id,
+                "created": created,
+                "kind": "check",
+                "max": 40,
+                "status": "running",
+                "delivered": False,
+                "attempt": 1,
+                "next_retry": created + server.BRIEF_RECOVERY_GRACE,
+                "next_progress": created + server.BRIEF_RETRY_SECONDS,
+            }
+        )
+        restarted = server.Broker(FakeBackend(), br.cache)
+        threading.Thread(
+            target=restarted.worker, args=(restarted.uq,), daemon=True
+        ).start()
+        restarted.resume_brief_jobs()
+        result = restarted.op_brief_wait({"job_id": job_id, "seconds": 2})
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["result"]["mail"]["count"], 3)
+        restarted.op_brief_ack({"job_id": job_id})
+
+    def test_30_long_catchup_reports_progress(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-progress-cache")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+        release = threading.Event()
+        original = br.mail_record
+        messages = []
+
+        def slow_record(acct, mid, retry=False):
+            self.assertTrue(release.wait(2))
+            return original(acct, mid, retry)
+
+        br.mail_record = slow_record
+        with (
+            patch.object(server, "BRIEF_RECOVERY_GRACE", 0),
+            patch.object(server, "BRIEF_RETRY_SECONDS", 0.05),
+            patch.object(server, "BRIEF_WATCH_TICK", 0.01),
+            patch.object(server.brief_recovery, "notify", messages.append),
+            patch.object(server.brief_recovery, "schedule", return_value=True),
+        ):
+            job_id = br.op_brief_start({})["job_id"]
+            deadline = time.monotonic() + 1
+            while not messages and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(messages)
+            self.assertIn("Still catching up", messages[0])
+            release.set()
+            ready = br.op_brief_wait({"job_id": job_id, "seconds": 2})
+            self.assertEqual(ready["status"], "ready")
+            br.op_brief_ack({"job_id": job_id})
+            time.sleep(0.05)  # watcher observes the acknowledgement
+
+    def test_31_failed_catchup_preserves_unseen_mail(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-failure-cache")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+
+        def fail_list(acct, query, maximum):
+            raise ConnectionError("Gmail unavailable")
+
+        br.b.mail_list = fail_list
+        messages = []
+        with (
+            patch.object(server, "BRIEF_RECOVERY_GRACE", 0),
+            patch.object(server, "BRIEF_WATCH_TICK", 0.01),
+            patch.object(server.brief_recovery, "notify", messages.append),
+        ):
+            job_id = br.op_brief_start({})["job_id"]
+            result = br.op_brief_wait({"job_id": job_id, "seconds": 2})
+            self.assertEqual(result["status"], "failed")
+            self.assertFalse((br.cache / "seen.json").exists())
+            deadline = time.monotonic() + 1
+            while not messages and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(messages), 1)
+
+    def test_32_delivery_start_failure_stops_with_result_saved(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-delivery-failure")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+        messages = []
+        attempts = []
+
+        def cannot_schedule(job_id, attempt):
+            attempts.append((job_id, attempt))
+            return False
+
+        with (
+            patch.object(server, "BRIEF_RECOVERY_GRACE", 0),
+            patch.object(server, "BRIEF_RETRY_SECONDS", 0.05),
+            patch.object(server, "BRIEF_WATCH_TICK", 0.01),
+            patch.object(server.brief_recovery, "notify", messages.append),
+            patch.object(server.brief_recovery, "schedule", cannot_schedule),
+        ):
+            job_id = br.op_brief_start({})["job_id"]
+            self.assertEqual(
+                br.op_brief_wait({"job_id": job_id, "seconds": 2})["status"],
+                "ready",
+            )
+            deadline = time.monotonic() + 2
+            while not messages and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(attempts), 3)
+            self.assertIn("couldn't start", messages[0])
+            self.assertEqual(
+                br.op_brief_job({"job_id": job_id})["status"], "ready"
+            )
+            self.assertFalse((br.cache / "seen.json").exists())
+
+    def test_33_delivery_lease_blocks_duplicate_briefs(self):
+        br = server.Broker(FakeBackend(), TMP / "brief-lease-cache")
+        threading.Thread(target=br.worker, args=(br.uq,), daemon=True).start()
+        with (
+            patch.object(server, "BRIEF_RETRY_SECONDS", 0.1),
+            patch.object(server.brief_recovery, "schedule", return_value=True),
+        ):
+            job_id = br.op_brief_start({})["job_id"]
+            first = br.op_brief_wait({"job_id": job_id, "seconds": 2})
+            self.assertEqual(first["status"], "ready")
+            self.assertEqual(
+                br.op_brief_job({"job_id": job_id, "claim": True})["status"],
+                "delivering",
+            )
+            time.sleep(0.12)
+            self.assertEqual(
+                br.op_brief_job({"job_id": job_id, "claim": True})["status"],
+                "ready",
+            )
+            br.op_brief_ack({"job_id": job_id})
+
     def test_99_no_secrets_leaked(self):
         blob = "\n".join(OUTPUTS)
         for s in SECRETS:

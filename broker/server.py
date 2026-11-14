@@ -22,6 +22,7 @@ import itertools
 import json
 import os
 import queue
+import secrets
 import socketserver
 import sys
 import threading
@@ -33,6 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
+import brief_recovery  # noqa: E402
 import trackers  # noqa: E402
 
 import notion  # noqa: E402
@@ -72,6 +74,15 @@ DEFAULT_SOCK = Path.home() / "dingding/docker/broker-io/broker.sock"
 DEFAULT_CACHE = Path.home() / ".local/share/privacy-broker"
 POLL_MAIL_SECONDS = 300
 POLL_NOTION_SECONDS = 1800
+BRIEF_WAIT_SECONDS = 55  # below OpenClaw's observed 90 s tool ceiling
+BRIEF_RECOVERY_GRACE = 90
+BRIEF_RETRY_SECONDS = 300
+BRIEF_JOB_MAX_AGE = 7 * 86400
+BRIEF_WATCH_TICK = 5
+BRIEF_REUSE_SECONDS = 86400
+BRIEF_JOB_ID_LEN = 16
+GMAIL_MAX_RESULTS = 500
+BRIEF_DELIVERY_ATTEMPTS = 3
 PRUNE_SECONDS = 6 * 3600
 TRACK_SCAN_SECONDS = (
     1800  # bills/flights extraction from new mail (background, local model)
@@ -196,6 +207,9 @@ class Broker:
         self.cache = _private_dir(Path(cache_dir))
         _private_dir(self.cache / "mail")
         _private_dir(self.cache / "notion")
+        self.brief_dir = _private_dir(self.cache / "brief_jobs")
+        self._brief_lock = threading.RLock()
+        self._brief_events = {}
         _private_dir(
             self.cache / "notion_served"
         )  # mapping_id last shown to the agent, per page
@@ -248,6 +262,9 @@ class Broker:
             # one call with everything a scheduled brief needs (saves agent
             # steps)
             "brief": self.op_brief,
+            "brief.start": self.op_brief_start,
+            "brief.job": self.op_brief_job,
+            "brief.ack": self.op_brief_ack,
         }
         self._lock = threading.Lock()
         self.tr = trackers.Trackers(self)
@@ -330,6 +347,14 @@ class Broker:
             {"ok": True, "result": ...} or {"ok": False, "error": message}.
         """
         op = request.get("op")
+        if op == "brief.wait":
+            try:
+                return {
+                    "ok": True,
+                    "result": self.op_brief_wait(request.get("args") or {}),
+                }
+            except RefusedError as e:
+                return {"ok": False, "error": str(e)}
         if op not in self.ops:
             return {"ok": False, "error": f"unknown op {op!r}"}
         lane = self.uq if op in MODEL_OPS else self.fq
@@ -474,7 +499,7 @@ class Broker:
                 archiving by bucket.
         """
         seen = self._seen()
-        emails, dropped = [], 0
+        emails, dropped, scanned = [], 0, {}
         for acct in self.b.accounts():
             done = set(seen.get(acct, []))
             for mid in self.b.mail_list(
@@ -489,13 +514,18 @@ class Broker:
                     emails.append(
                         self.public_email(rec, body_limit=NEW_BODY_CHARS)
                     )
-                if not a.get("peek"):
-                    seen.setdefault(acct, []).append(mid)
-            seen[acct] = seen.get(acct, [])[-3000:]
-        if not a.get("peek"):
-            _write_private(self.cache / "seen.json", seen)
-        self._remember_shown(emails)
-        return {
+                scanned.setdefault(acct, []).append(mid)
+        if not a.get("peek") and not a.get("_defer_seen"):
+            with self._brief_lock:
+                current = self._seen()
+                for acct, ids in scanned.items():
+                    current[acct] = list(
+                        dict.fromkeys(current.get(acct, []) + ids)
+                    )[-3000:]
+                _write_private(self.cache / "seen.json", current)
+        if not a.get("_defer_seen"):
+            self._remember_shown(emails)
+        out = {
             "count": len(emails),
             "dropped": dropped,
             "emails": emails,
@@ -503,6 +533,9 @@ class Broker:
             + " Sensitive emails stay on the laptop; dropped ones (codes,"
             " password resets) are not shown.",
         }
+        if a.get("_defer_seen"):
+            out["_seen_ids"] = scanned
+        return out
 
     def op_mail_search(self, a):
         """Runs a Gmail search and returns the filtered matches.
@@ -1247,7 +1280,11 @@ class Broker:
             "now": dt.datetime.now(TZ).strftime("%a %Y-%m-%d %H:%M %Z"),
             "kind": a.get("kind") or "check",
             "mail": self.op_mail_new(
-                {"peek": a.get("peek"), "max": a.get("max", 40)}
+                {
+                    "peek": a.get("peek"),
+                    "max": a.get("max", 40),
+                    "_defer_seen": a.get("_defer_seen"),
+                }
             ),
             "pending_before": self.op_pending({}),
             "trackers": self.tr.summary(),
@@ -1255,6 +1292,235 @@ class Broker:
         if out["kind"] == "morning":
             out["calendar_today"] = self.b.cal_list(1)
         return out
+
+    # ---------- resumable briefs ----------
+
+    def _brief_path(self, job_id):
+        """Returns a private job path for a valid opaque id."""
+        if not isinstance(job_id, str) or len(job_id) != BRIEF_JOB_ID_LEN:
+            raise RefusedError("invalid brief job id")
+        if any(ch not in "0123456789abcdef" for ch in job_id):
+            raise RefusedError("invalid brief job id")
+        return self.brief_dir / f"{job_id}.json"
+
+    def _brief_load(self, job_id):
+        """Loads a saved brief job or rejects an unknown id."""
+        path = self._brief_path(job_id)
+        if not path.exists():
+            raise RefusedError("brief job not found")
+        return json.loads(path.read_text())
+
+    def _brief_save(self, job):
+        """Atomically saves a brief job."""
+        _write_private(self._brief_path(job["id"]), job)
+
+    def op_brief_start(self, a):
+        """Starts one durable, resumable brief without waiting for filtering."""
+        kind = a.get("kind") or "check"
+        if kind not in ("check", "morning", "midday", "evening"):
+            raise RefusedError("invalid brief kind")
+        maximum = int(a.get("max", 40))
+        if not 1 <= maximum <= GMAIL_MAX_RESULTS:
+            raise RefusedError("brief max must be 1 through 500")
+        with self._brief_lock:
+            for path in sorted(self.brief_dir.glob("*.json"), reverse=True):
+                job = json.loads(path.read_text())
+                if (
+                    job["kind"] == kind
+                    and job["max"] == maximum
+                    and not job.get("delivered")
+                    and job["status"] in ("running", "ready")
+                    and time.time() - job["created"] < BRIEF_REUSE_SECONDS
+                ):
+                    return {"job_id": job["id"], "status": job["status"]}
+            job_id = secrets.token_hex(8)
+            created = time.time()
+            job = {
+                "id": job_id,
+                "created": created,
+                "kind": kind,
+                "max": maximum,
+                "status": "running",
+                "delivered": False,
+                "attempt": 1,
+                "next_retry": created + BRIEF_RECOVERY_GRACE,
+                "next_progress": created + BRIEF_RETRY_SECONDS,
+            }
+            self._brief_save(job)
+            self._brief_events[job_id] = threading.Event()
+        self.submit(1, self._run_brief_job, job_id, lane=self.uq)
+        self._start_brief_watcher(job_id)
+        return {"job_id": job_id, "status": "running"}
+
+    def _run_brief_job(self, job_id):
+        """Filters once and stores a result without advancing seen."""
+        job = self._brief_load(job_id)
+        try:
+            result = self.op_brief(
+                {"kind": job["kind"], "max": job["max"], "_defer_seen": True}
+            )
+            seen_ids = result["mail"].pop("_seen_ids")
+            with self._brief_lock:
+                job = self._brief_load(job_id)
+                job.update(status="ready", result=result, seen_ids=seen_ids)
+                self._brief_save(job)
+        except Exception as e:  # noqa: BLE001  (persist failure for the owner)
+            with self._brief_lock:
+                job = self._brief_load(job_id)
+                job.update(status="failed", error=f"{type(e).__name__}: {e}")
+                self._brief_save(job)
+        finally:
+            self._brief_events[job_id].set()
+
+    def op_brief_job(self, a):
+        """Returns a prepared brief, or its progress, by opaque id."""
+        with self._brief_lock:
+            job = self._brief_load(a.get("job_id"))
+            if a.get("claim") and job["status"] == "ready":
+                if job.get("delivered"):
+                    return {"job_id": job["id"], "status": "delivered"}
+                if time.time() < job.get("lease_until", 0):
+                    return {"job_id": job["id"], "status": "delivering"}
+                job["lease_until"] = time.time() + BRIEF_RETRY_SECONDS
+                self._brief_save(job)
+        out = {"job_id": job["id"], "status": job["status"]}
+        if job.get("delivered"):
+            out["status"] = "delivered"
+        elif job["status"] == "ready":
+            out["result"] = job["result"]
+        elif job["status"] == "failed":
+            out["error"] = job["error"]
+        return out
+
+    def op_brief_wait(self, a):
+        """Waits briefly for a job without blocking the broker's fast lane."""
+        job_id = a.get("job_id")
+        self._brief_load(job_id)
+        seconds = max(0, min(float(a.get("seconds", 55)), BRIEF_WAIT_SECONDS))
+        event = self._brief_events.get(job_id)
+        if event:
+            event.wait(seconds)
+        return self.op_brief_job({"job_id": job_id, "claim": True})
+
+    def op_brief_ack(self, a):
+        """Marks a saved brief delivered only after Telegram send succeeds."""
+        job_id = a.get("job_id")
+        with self._brief_lock:
+            job = self._brief_load(job_id)
+            if job.get("delivered"):
+                return {"job_id": job_id, "delivered": True}
+            if job["status"] != "ready":
+                raise RefusedError("brief is not ready")
+            self._remember_shown(job["result"]["mail"]["emails"])
+            seen = self._seen()
+            for acct, ids in job["seen_ids"].items():
+                seen[acct] = list(dict.fromkeys(seen.get(acct, []) + ids))[
+                    -3000:
+                ]
+            _write_private(self.cache / "seen.json", seen)
+            job["delivered"] = True
+            job.pop("result", None)
+            job.pop("seen_ids", None)
+            self._brief_save(job)
+        return {"job_id": job_id, "delivered": True}
+
+    def _start_brief_watcher(self, job_id):
+        """Starts a host-side retry loop; it costs no model calls while busy."""
+        threading.Thread(
+            target=self._watch_brief, args=(job_id,), daemon=True
+        ).start()
+
+    def _watch_brief(self, job_id):  # noqa: PLR0912  (delivery state machine)
+        """Reports progress every five minutes and retries delivery."""
+        while True:
+            with self._brief_lock:
+                try:
+                    job = self._brief_load(job_id)
+                except RefusedError:
+                    return  # retention may have removed an old job
+                if job.get("delivered"):
+                    return
+                now = time.time()
+                if now < job["created"] + BRIEF_RECOVERY_GRACE:
+                    action = None
+                elif job["status"] == "failed":
+                    action = "failed" if not job.get("error_notified") else None
+                elif job["status"] == "running":
+                    action = "progress" if now >= job["next_progress"] else None
+                elif now < job.get("lease_until", 0):
+                    action = None
+                elif (
+                    job["attempt"] > BRIEF_DELIVERY_ATTEMPTS
+                    and now >= job["next_retry"]
+                ):
+                    action = "exhausted"
+                elif (
+                    job.get("schedule_failures", 0) >= BRIEF_DELIVERY_ATTEMPTS
+                    and now >= job["next_retry"]
+                ):
+                    action = "schedule_failed"
+                else:
+                    action = "retry" if now >= job["next_retry"] else None
+                if action == "progress":
+                    job["next_progress"] = now + BRIEF_RETRY_SECONDS
+                elif action == "failed":
+                    job["error_notified"] = True
+                elif action == "retry":
+                    job["next_retry"] = now + BRIEF_RETRY_SECONDS
+                if action:
+                    self._brief_save(job)
+            if action == "progress":
+                brief_recovery.notify(
+                    "Still catching up on mail. I'll send your update when "
+                    "it is ready."
+                )
+            elif action == "failed":
+                brief_recovery.notify(
+                    "I couldn't finish the inbox catch-up. Please ask for "
+                    "updates again; the checks already completed are cached."
+                )
+                return
+            elif action == "exhausted":
+                brief_recovery.notify(
+                    "Your inbox update is ready, but automatic delivery "
+                    "failed three times. Ask for updates to retrieve it."
+                )
+                return
+            elif action == "schedule_failed":
+                brief_recovery.notify(
+                    "Your inbox update is ready, but I couldn't start "
+                    "automatic delivery. Ask for updates to retrieve it."
+                )
+                return
+            elif action == "retry":
+                scheduled = brief_recovery.schedule(job_id, job["attempt"])
+                with self._brief_lock:
+                    fresh = self._brief_load(job_id)
+                    if scheduled:
+                        fresh["attempt"] += 1
+                        fresh["schedule_failures"] = 0
+                    else:
+                        fresh["schedule_failures"] = (
+                            fresh.get("schedule_failures", 0) + 1
+                        )
+                    self._brief_save(fresh)
+            time.sleep(BRIEF_WATCH_TICK)
+
+    def resume_brief_jobs(self):
+        """Restarts unfinished briefs and delivery checks after a reboot."""
+        for path in self.brief_dir.glob("*.json"):
+            job = json.loads(path.read_text())
+            if (
+                job.get("delivered")
+                or time.time() - job["created"] > BRIEF_JOB_MAX_AGE
+            ):
+                continue
+            event = self._brief_events.setdefault(job["id"], threading.Event())
+            if job["status"] == "running":
+                self.submit(1, self._run_brief_job, job["id"], lane=self.uq)
+            else:
+                event.set()
+            self._start_brief_watcher(job["id"])
 
     def _watch_add(self, a):
         try:
@@ -1911,6 +2177,12 @@ class Broker:
             if mid not in live:
                 f.unlink(missing_ok=True)
                 removed += 1
+        brief_cutoff = max(cutoff, time.time() - BRIEF_JOB_MAX_AGE)
+        with self._brief_lock:
+            for path in self.brief_dir.glob("*.json"):
+                if path.stat().st_mtime < brief_cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
         return removed
 
     def pollers(
@@ -2005,6 +2277,7 @@ def serve(broker, sock_path, background=True):
     threading.Thread(
         target=broker.worker, args=(broker.fq,), daemon=True
     ).start()  # user lane (fast)
+    broker.resume_brief_jobs()
     if background:
         broker.pollers()
     print(f"privacy broker listening on {sock_path}", flush=True)

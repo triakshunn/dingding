@@ -114,6 +114,7 @@ ia recent · ia archive · ia unarchive · ia cleanup · ia mail-log · ia undo-
 - A personal project, not audited. The filter reduces what the cloud sees; it is not a guarantee.
   Emails it marks sensitive are never sent, but a missed phone number in a normal email could be.
 - The local model is slow on CPU; the broker pre-filters new mail in the background every 5 minutes.
+  A cold-cache brief continues as a saved job if it takes over 55 seconds, with a Telegram update once ready.
 - Gmail tokens on the host can technically send mail (the compose scope); the code never does, and the
   container never gets the tokens.
 - Built against OpenClaw 2026.10.6.

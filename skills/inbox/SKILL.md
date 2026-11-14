@@ -42,7 +42,8 @@ Every reminder that fires runs you once (it costs the user's quota), so:
 5. Ignore marketing/promotions entirely for suggestions (sales, coupons, "offer ends", "% off").
 
 ## Commands
-- `ia brief [--morning|--midday|--evening]` — everything a brief needs in one call (see "Checking mail"). Marks emails seen.
+- `ia brief-start [--morning|--midday|--evening]` — starts or resumes a saved brief, waiting up to 55 seconds. Returns `status: ready` with `result`, or `status: running` with a job id. Mail stays unseen until `ia brief-ack ID` after a successful Telegram send.
+- `ia brief-job ID` — reads that saved job when recovery runs. `ia brief-ack ID` — acknowledges delivery; only run after the message tool confirms the brief was sent.
 - `ia new` — unseen recent emails from all accounts: bucket, summary, events and (non-sensitive) redacted body. Sensitive emails show only the sender; `dropped` counts withheld security emails. Marks them seen. (`--peek` to not mark.)
 - `ia search "<gmail query>" [--account school] [--max 5]` — e.g. `ia search "from:landlord lease newer_than:60d"`.
   Emails not seen before are each checked by the laptop's privacy model first (~30 s each), so a broad search can take
@@ -108,14 +109,14 @@ Every reminder that fires runs you once (it costs the user's quota), so:
 - `ia draft N --body "<text>"` — create/update the Gmail draft for pending reply N (appears in Gmail Drafts right away; placeholders are filled in with the real details). Show the user the draft as you wrote it.
 
 ## Checking mail / writing a brief
-When asked to check mail (or on a scheduled brief), use exactly THREE steps:
-- **Step 1:** one exec: `~/dingding/bin/ia brief --morning` (or `--midday` / `--evening`; plain `ia brief` when
-  the user asks to check mail). It returns `mail` (same as `ia new`: every new email with its full filtered body),
+When asked to check mail (or on a scheduled brief), use these steps:
+- **Step 1:** one exec: `~/dingding/bin/ia brief-start --morning` (or `--midday` / `--evening`; plain `ia brief-start` when
+  the user asks to check mail). If status is `running` or `delivering`, send one short Telegram message: "I'm catching up on mail from while the laptop was off. I'll send your update automatically when it's ready." Then stop. The laptop checks every five minutes and starts a recovery turn when ready. If status is `failed`, report the error and stop. If status is `ready`, use its `result`: `mail` (same as `ia new`: every new email with its full filtered body),
   `calendar_today` (morning only), `pending_before` and `now`. Don't run `ia new`, `ia read`, `ia search` or
   `ia cal-list` during a brief: everything is already in this output. Skip events whose time has already passed.
 - **Step 2:** ONE exec with all your `ia suggest-event …` / `ia suggest-reply …` commands joined with `;` (each prints
   its pending number, in order). Skip this step if there is nothing to suggest.
-- **Step 3:** reply with the brief below (or `NO_REPLY`). No progress messages.
+- **Step 3:** send the finished brief below with the `message` tool. After it succeeds, run `~/dingding/bin/ia brief-ack <job_id>` and return `NO_REPLY`. If the brief is intentionally silent (`NO_REPLY`), acknowledge it before returning. If the send fails, do not acknowledge: the laptop will retry delivery. For a saved recovery turn, start with `ia brief-job <job_id>` and follow steps 2–3. If that job is still running, being delivered elsewhere, or already delivered, return `NO_REPLY` so the laptop can retry later or stop.
 Sorting rules:
 1. Use only the step-1 output.
 2. Sort every email into exactly one bucket:

@@ -20,6 +20,14 @@
 Results are cached per message / per Notion `last_edited_time`; the broker pre-filters new mail every
 5 minutes and changed Notion pages every 30 minutes, at lower priority than your own requests.
 
+A requested brief uses a durable job. `ia brief-start` waits at most 55 seconds;
+if filtering takes longer, the broker saves the result and sends progress every
+5 minutes. When ready, it starts a short OpenClaw recovery turn that reads the
+saved result and sends the brief on Telegram. The broker marks those messages
+seen only after the agent confirms that Telegram send. Jobs survive a broker
+restart. Delivery is retried every 5 minutes, with an error notice after three
+failed attempts.
+
 ## Writes (pass-through)
 The cloud model writes; the broker puts real values back (`rehydrate`) just before saving:
 - Gmail drafts (never sent; `ia-send` refuses), calendar events (only from pending suggestions the user named),
