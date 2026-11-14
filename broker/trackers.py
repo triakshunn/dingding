@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import time
@@ -38,6 +39,8 @@ SERPAPI_MONTHLY_CAP = int(
     os.environ.get("SERPAPI_MONTHLY_CAP", "240")
 )  # free plan: 250 searches/month
 WATCH_EVERY_HOURS = 24
+WATCH_RETURN_CANDIDATES = 2  # cap return searches per filtered round trip
+MAX_EXACT_OUTBOUND = 4
 MAX_SEARCHES_PER_REQUEST = 12  # one flight-search request (legs x dates)
 SEARCH_TOP = 3  # cheapest options shown per leg and date
 DROP_ALERT = 0.05  # alert when the lowest price beats the previous low by 5 %+
@@ -253,6 +256,16 @@ def _public_watch(w):
         "depart": w["depart"],
         "return": w.get("return"),
         "max_price": w.get("max_price"),
+        "mode": "exact" if w.get("outbound_flights") else "route",
+        "airline": w.get("airline"),
+        "nonstop": bool(w.get("nonstop")),
+        "outbound_times": w.get("outbound_times"),
+        "outbound_flights": w.get("outbound_flights"),
+        "return_times": w.get("return_times"),
+        "return_any_time": bool(
+            w.get("outbound_flights") and not w.get("return_times")
+        ),
+        "reference_price": w.get("reference_price"),
         "latest": last,
         "lowest_seen": min(lows) if lows else None,
         "checks": len(w["history"]),
@@ -337,23 +350,61 @@ def _leg_result(leg, date, data, top):
     }
 
 
-def parse_price(data):
+def _matching_options(
+    data, *, airline=None, nonstop=False, frm=None, to=None, date=None
+):
+    """Return priced itineraries whose visible leg satisfies the watch."""
+    options = (data.get("best_flights") or []) + (
+        data.get("other_flights") or []
+    )
+    matches = []
+    for option in options:
+        legs = option.get("flights") or []
+        if not isinstance(option.get("price"), (int, float)):
+            continue
+        if not legs and any((airline, nonstop, frm, to, date)):
+            continue
+        if nonstop and len(legs) != 1:
+            continue
+        if frm and (legs[0].get("departure_airport") or {}).get("id") != frm:
+            continue
+        if to and (legs[-1].get("arrival_airport") or {}).get("id") != to:
+            continue
+        if date and not str(
+            (legs[0].get("departure_airport") or {}).get("time", "")
+        ).startswith(date):
+            continue
+        if airline and any(
+            airline_code(leg.get("airline"), leg.get("flight_number"))
+            != airline
+            for leg in legs
+        ):
+            continue
+        matches.append(option)
+    return sorted(matches, key=lambda option: option["price"])
+
+
+def parse_price(
+    data, *, airline=None, nonstop=False, frm=None, to=None, date=None
+):
     """Summarizes a SerpApi Google Flights answer.
 
     Returns:
         {"lowest", "level", "typical", "best"}, where best has price, airline,
             stops, departs and duration_min of the cheapest option.
     """
-    options = (data.get("best_flights") or []) + (
-        data.get("other_flights") or []
+    filtered = any((airline, nonstop, frm, to, date))
+    priced = _matching_options(
+        data, airline=airline, nonstop=nonstop, frm=frm, to=to, date=date
     )
-    priced = [o for o in options if isinstance(o.get("price"), (int, float))]
-    best = min(priced, key=lambda o: o["price"]) if priced else None
+    best = priced[0] if priced else None
     ins = data.get("price_insights") or {}
     out = {
-        "lowest": ins.get("lowest_price") or (best or {}).get("price"),
-        "level": ins.get("price_level"),
-        "typical": ins.get("typical_price_range"),
+        "lowest": (best or {}).get("price")
+        if filtered
+        else ins.get("lowest_price") or (best or {}).get("price"),
+        "level": None if filtered else ins.get("price_level"),
+        "typical": None if filtered else ins.get("typical_price_range"),
     }
     if best:
         legs = best.get("flights") or []
@@ -371,6 +422,33 @@ def parse_price(data):
             "duration_min": best.get("total_duration"),
         }
     return out
+
+
+def _flight_number(option):
+    """Normalised number of a nonstop option, e.g. DL 123 -> DL123."""
+    legs = option.get("flights") or []
+    if len(legs) != 1:
+        return ""
+    return re.sub(r"\s+", "", legs[0].get("flight_number") or "").upper()
+
+
+def _flight_time(option):
+    legs = option.get("flights") or []
+    if not legs:
+        return ""
+    stamp = (legs[0].get("departure_airport") or {}).get("time") or ""
+    return stamp.rsplit(" ", 1)[-1] if " " in stamp else ""
+
+
+def _watch_times(values, label):
+    times = list(dict.fromkeys(values or []))
+    if not times or any(
+        not isinstance(t, str)
+        or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", t)
+        for t in times
+    ):
+        raise ValueError(f"{label} must contain 24-hour HH:MM times")
+    return times
 
 
 class Trackers:
@@ -697,15 +775,12 @@ class Trackers:
         )
         return p.read_text().strip() if p.exists() else ""
 
-    def watch_add(self, a):
-        """Adds (or replaces) a flight price watch.
+    def _new_watch(self, a):
+        """Validate watch input and build a record without saving it.
 
         Args:
-            a: {"from", "to", "depart", "return"?, "max_price"?} with IATA codes
-                and YYYY-MM-DD dates.
-
-        Returns:
-            The new watch's id and public view, plus a note.
+            a: {"from", "to", "depart", "return"?, "max_price"?,
+                "airline"?, "nonstop"?} with IATA codes and YYYY-MM-DD dates.
 
         Raises:
             ValueError: Missing field, bad airport code or date.
@@ -719,21 +794,61 @@ class Trackers:
         ):
             raise ValueError("use 3-letter airport codes, e.g. DTW BOM")
         for k in ("depart", "return"):
-            if a.get(k) and not _date(a[k]):
+            if a.get(k) and (
+                not isinstance(a[k], str)
+                or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", a[k])
+                or not _date(a[k])
+            ):
                 raise ValueError(f"{k} must be YYYY-MM-DD")
-        watches = self._load("watches", [])
-        w = {
-            "id": _hid("watch", frm, to, a["depart"], a.get("return")),
+        if a.get("return") and _date(a["return"]) <= _date(a["depart"]):
+            raise ValueError("return must be after depart")
+        if _date(a["depart"]) < self.now().date():
+            raise ValueError("departure date is in the past")
+        airline = str(a.get("airline") or "").strip().upper() or None
+        if airline == "DELTA":
+            airline = "DL"
+        if airline and not re.fullmatch(r"[A-Z0-9]{2}", airline):
+            raise ValueError("airline must be a 2-character IATA code, e.g. DL")
+        nonstop = a.get("nonstop", False)
+        if not isinstance(nonstop, bool):
+            raise ValueError("nonstop must be true or false")
+        max_price = a.get("max_price")
+        if max_price is not None and (
+            not isinstance(max_price, (int, float))
+            or isinstance(max_price, bool)
+            or not math.isfinite(max_price)
+            or max_price <= 0
+        ):
+            raise ValueError("max_price must be a positive number")
+        return {
+            "id": _hid(
+                "watch",
+                frm,
+                to,
+                a["depart"],
+                a.get("return"),
+                *([airline, nonstop] if airline or nonstop else []),
+            ),
             "from": frm,
             "to": to,
             "depart": a["depart"],
             "return": a.get("return"),
-            "max_price": a.get("max_price"),
+            "max_price": max_price,
+            "airline": airline,
+            "nonstop": nonstop,
             "created": self.now().isoformat(timespec="minutes"),
             "history": [],
         }
+
+    def _store_watch(self, w):
+        watches = self._load("watches", [])
         watches = [x for x in watches if x["id"] != w["id"]] + [w]
         self._save("watches", watches)
+
+    def watch_add(self, a):
+        """Adds (or replaces) a general route price watch."""
+        w = self._new_watch(a)
+        self._store_watch(w)
         note = (
             ""
             if self._serpapi_key()
@@ -746,6 +861,179 @@ class Trackers:
             "added": w["id"],
             "watch": _public_watch(w),
             "note": "Checked about once a day." + note,
+        }
+
+    def watch_exact_add(self, a):  # noqa: PLR0912, PLR0915  (validation and fare resolution)
+        """Resolve specified outbound flights and save a checked itinerary.
+
+        Each outbound option has a fixed flight number. The return is either
+        any matching flight on the return date or one of the requested times.
+        No watch is saved if any requested outbound cannot be identified or
+        has no matching return fare.
+        """
+        if not a.get("return"):
+            raise ValueError("exact itinerary needs a return date")
+        w = self._new_watch(a)
+        if not w["airline"]:
+            raise ValueError(
+                "which airline? Give its 2-character code, e.g. DL"
+            )
+        if not w["nonstop"]:
+            raise ValueError("specify --nonstop for a nonstop itinerary")
+        raw_times = a.get("outbound_times") or []
+        raw_numbers = a.get("outbound_flights") or []
+        if bool(raw_times) == bool(raw_numbers):
+            raise ValueError(
+                "give outbound time(s) or flight number(s), but not both"
+            )
+        times = _watch_times(raw_times, "outbound_times") if raw_times else []
+        numbers = [re.sub(r"\s+", "", str(n)).upper() for n in raw_numbers]
+        if numbers and any(
+            not re.fullmatch(r"[A-Z0-9]{2}\d{1,4}", n)
+            or not n.startswith(w["airline"])
+            for n in numbers
+        ):
+            raise ValueError(
+                "outbound flight numbers must use the airline code, e.g. DL123"
+            )
+        specs = times or numbers
+        if len(specs) > MAX_EXACT_OUTBOUND:
+            raise ValueError("use at most four outbound options per watch")
+        return_any = a.get("return_any_time", False)
+        raw_return_times = a.get("return_times") or []
+        if (
+            not isinstance(return_any, bool)
+            or bool(raw_return_times) == return_any
+        ):
+            raise ValueError("choose --return-any-time or return time(s)")
+        return_times = (
+            _watch_times(raw_return_times, "return_times")
+            if raw_return_times
+            else []
+        )
+        reference = a.get("reference_price")
+        if reference is not None and (
+            not isinstance(reference, (int, float))
+            or isinstance(reference, bool)
+            or not math.isfinite(reference)
+            or reference <= 0
+        ):
+            raise ValueError("reference_price must be a positive number")
+        key = self._serpapi_key()
+        if not key:
+            raise ValueError("no SerpApi key on the laptop yet")
+        month = self.now().strftime("%Y-%m")
+        used = self._load("serpapi_usage", {}).get(month, 0)
+        if used + 1 + len(specs) > SERPAPI_MONTHLY_CAP:
+            raise ValueError("not enough flight searches left this month")
+
+        self._spend()
+        data = self.fetch_price(w, key)
+        if data.get("error"):
+            raise ValueError("Google Flights lookup failed; try again later")
+        outbound = _matching_options(
+            data,
+            airline=w["airline"],
+            nonstop=True,
+            frm=w["from"],
+            to=w["to"],
+            date=w["depart"],
+        )
+        selected = []
+        for spec in specs:
+            candidates = [
+                o
+                for o in outbound
+                if (_flight_time(o) if times else _flight_number(o)) == spec
+            ]
+            unique = {
+                _flight_number(o): o
+                for o in reversed(candidates)
+                if _flight_number(o)
+            }
+            if len(unique) != 1:
+                available = (
+                    ", ".join(
+                        f"{_flight_time(o)} {_flight_number(o)}"
+                        for o in outbound[:8]
+                    )
+                    or "none"
+                )
+                raise ValueError(
+                    f"could not identify one {w['airline']} nonstop "
+                    f"outbound for {spec}; "
+                    f"available: {available}. Ask which flight to track."
+                )
+            selected.append(next(iter(unique.values())))
+        if len({_flight_number(o) for o in selected}) != len(selected):
+            raise ValueError("outbound options must name different flights")
+
+        results = []
+        for option in selected:
+            token = option.get("departure_token")
+            if not token:
+                raise ValueError(
+                    "Google Flights did not provide return options for "
+                    f"{_flight_number(option)}"
+                )
+            self._spend()
+            returns = self.fetch_price(w, key, token)
+            if returns.get("error"):
+                raise ValueError(
+                    "Google Flights return lookup failed; try again later"
+                )
+            choices = _matching_options(
+                returns,
+                airline=w["airline"],
+                nonstop=True,
+                frm=w["to"],
+                to=w["from"],
+                date=w["return"],
+            )
+            if return_times:
+                choices = [
+                    o for o in choices if _flight_time(o) in return_times
+                ]
+            if not choices:
+                raise ValueError(
+                    f"no matching return fare for {_flight_number(option)} "
+                    f"on {w['return']}; ask about another return option"
+                )
+            results.append((option, choices[0]))
+
+        w["id"] = _hid(
+            "watch-exact",
+            w["from"],
+            w["to"],
+            w["depart"],
+            w["return"],
+            *sorted(_flight_number(o) for o in selected),
+            *return_times,
+        )
+        w["outbound_flights"] = [_flight_number(o) for o in selected]
+        w["outbound_times"] = [_flight_time(o) for o in selected]
+        w["return_times"] = return_times or None
+        w["reference_price"] = reference
+        best = min(results, key=lambda pair: pair[1]["price"])
+        initial = parse_price(
+            {"best_flights": [best[1]]},
+            airline=w["airline"],
+            nonstop=True,
+            frm=w["to"],
+            to=w["from"],
+            date=w["return"],
+        )
+        initial["best"]["outbound_flight"] = _flight_number(best[0])
+        w["history"] = [
+            {"at": self.now().isoformat(timespec="minutes"), **initial}
+        ]
+        self._store_watch(w)
+        return {
+            "added": w["id"],
+            "watch": _public_watch(w),
+            "note": "Exact outbound flight(s) verified; return fare checked. "
+            "Checks run about once a day; price changes go to Telegram. "
+            "This does not enable Google Flights email tracking.",
         }
 
     def watch_rm(self, wid):
@@ -775,8 +1063,8 @@ class Trackers:
         usage[k] = usage.get(k, 0) + 1
         self._save("serpapi_usage", usage)
 
-    def fetch_price(self, w, key):
-        """Queries SerpApi Google Flights for one watch (uses one search)."""
+    def fetch_price(self, w, key, departure_token=None):
+        """Queries SerpApi Google Flights for one leg (uses one search)."""
         q = {
             "engine": "google_flights",
             "departure_id": w["from"],
@@ -789,6 +1077,12 @@ class Trackers:
         }
         if w.get("return"):
             q["return_date"] = w["return"]
+        if w.get("airline"):
+            q["include_airlines"] = w["airline"]
+        if w.get("nonstop"):
+            q["stops"] = "1"
+        if departure_token:
+            q["departure_token"] = departure_token
         return _serpapi(q)
 
     def search_flights(self, legs, carry_on=True, top=SEARCH_TOP):
@@ -850,7 +1144,7 @@ class Trackers:
             "airline or Google Flights site.",
         }
 
-    def check_prices(self):
+    def check_prices(self):  # noqa: PLR0912, PLR0915  (watch state and notifications)
         """Checks each due watch (about daily) and alerts on price drops.
 
         Stays within SERPAPI_MONTHLY_CAP searches per month. Alerts when the
@@ -874,7 +1168,85 @@ class Trackers:
                 break
             self._spend()
             try:
-                res = parse_price(self.fetch_price(w, key))
+                data = self.fetch_price(w, key)
+                filtered = bool(w.get("airline") or w.get("nonstop"))
+                if filtered and w.get("return"):
+                    outbound = _matching_options(
+                        data,
+                        airline=w.get("airline"),
+                        nonstop=w.get("nonstop"),
+                        frm=w["from"],
+                        to=w["to"],
+                        date=w["depart"],
+                    )
+                    exact_flights = set(w.get("outbound_flights") or [])
+                    if exact_flights:
+                        outbound = [
+                            o
+                            for o in outbound
+                            if _flight_number(o) in exact_flights
+                        ]
+                    res = {"lowest": None}
+                    seen_tokens = set()
+                    seen_flights = set()
+                    for candidate in outbound:
+                        token = candidate.get("departure_token")
+                        if not token or token in seen_tokens:
+                            continue
+                        number = _flight_number(candidate)
+                        if exact_flights and number in seen_flights:
+                            continue
+                        limit = (
+                            len(exact_flights)
+                            if exact_flights
+                            else WATCH_RETURN_CANDIDATES
+                        )
+                        if len(seen_tokens) >= limit or not self._budget_ok():
+                            break
+                        seen_tokens.add(token)
+                        seen_flights.add(number)
+                        self._spend()
+                        returns = self.fetch_price(w, key, token)
+                        choices = _matching_options(
+                            returns,
+                            airline=w.get("airline"),
+                            nonstop=w.get("nonstop"),
+                            frm=w["to"],
+                            to=w["from"],
+                            date=w["return"],
+                        )
+                        if w.get("return_times"):
+                            choices = [
+                                o
+                                for o in choices
+                                if _flight_time(o) in w["return_times"]
+                            ]
+                        result = parse_price(
+                            {"best_flights": choices[:1]},
+                            airline=w.get("airline"),
+                            nonstop=w.get("nonstop"),
+                            frm=w["to"],
+                            to=w["from"],
+                            date=w["return"],
+                        )
+                        if result.get("lowest") and (
+                            not res.get("lowest")
+                            or result["lowest"] < res["lowest"]
+                        ):
+                            result["best"]["outbound_flight"] = number
+                            result["best"]["outbound_time"] = _flight_time(
+                                candidate
+                            )
+                            res = result
+                else:
+                    res = parse_price(
+                        data,
+                        airline=w.get("airline"),
+                        nonstop=w.get("nonstop", False),
+                        frm=w["from"] if filtered else None,
+                        to=w["to"] if filtered else None,
+                        date=w["depart"] if filtered else None,
+                    )
             except Exception as e:  # noqa: BLE001  (never log the URL: it holds the key)
                 res = {"error": type(e).__name__}
             prev = [h["lowest"] for h in w["history"] if h.get("lowest")]
@@ -884,23 +1256,61 @@ class Trackers:
             w["history"] = w["history"][-60:]
             changed = True
             low = res.get("lowest")
-            if low and (
-                (prev and low <= min(prev) * (1 - DROP_ALERT))
-                or (
-                    w.get("max_price")
-                    and low <= w["max_price"]
-                    and not any(p <= w["max_price"] for p in prev)
+            exact = bool(w.get("outbound_flights"))
+            price_changed = (
+                bool(low and prev and low != prev[-1])
+                if exact
+                else bool(
+                    low
+                    and (
+                        (prev and low <= min(prev) * (1 - DROP_ALERT))
+                        or (
+                            w.get("max_price")
+                            and low <= w["max_price"]
+                            and not any(p <= w["max_price"] for p in prev)
+                        )
+                    )
                 )
-            ):
+            )
+            if price_changed:
                 b = res.get("best") or {}
+                direction = "📈" if exact and low > prev[-1] else "📉"
+                label = "Flight price changed" if exact else "Flight price drop"
+                outbound_time = b.get("outbound_time") or next(
+                    (
+                        t
+                        for n, t in zip(
+                            w.get("outbound_flights") or [],
+                            w.get("outbound_times") or [],
+                            strict=False,
+                        )
+                        if n == b.get("outbound_flight")
+                    ),
+                    "?",
+                )
                 self.notify(
-                    f"📉 Flight price drop: {w['from']} → {w['to']} on"
+                    f"{direction} {label}: {w['from']} → {w['to']} on"
                     f" {w['depart']}"
                     + (f" (return {w['return']})" if w.get("return") else "")
                     + f": ${low:,.0f}"
-                    + (f", was ${min(prev):,.0f}" if prev else "")
                     + (
-                        f"\n{b.get('airline')} · {b.get('stops')} stop(s)"
+                        f", was ${prev[-1] if exact else min(prev):,.0f}"
+                        if prev
+                        else ""
+                    )
+                    + (
+                        f"\nOutbound: {b.get('outbound_flight')} at "
+                        f"{outbound_time}"
+                        if exact
+                        else ""
+                    )
+                    + (
+                        f"\n{b.get('airline')} · "
+                        + (
+                            "nonstop both ways"
+                            if w.get("return") and w.get("nonstop")
+                            else f"{b.get('stops')} stop(s)"
+                        )
                         if b
                         else ""
                     )

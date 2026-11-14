@@ -111,10 +111,19 @@ def main():  # noqa: PLR0912, PLR0915  (CLI subcommand dispatcher)
     )
     p.add_argument("--no-carry-on", action="store_true")
     p = sp.add_parser("flight-watch")
-    p.add_argument("action", choices=["add", "list", "rm"])
+    p.add_argument("action", choices=["add", "exact-add", "list", "rm"])
     p.add_argument("args", nargs="*")
     p.add_argument("--return", dest="ret")
     p.add_argument("--max-price", type=float)
+    p.add_argument("--airline", help="IATA airline code, e.g. DL for Delta")
+    p.add_argument("--nonstop", action="store_true")
+    p.add_argument("--outbound-time", action="append", dest="outbound_times")
+    p.add_argument(
+        "--outbound-flight", action="append", dest="outbound_flights"
+    )
+    p.add_argument("--return-time", action="append", dest="return_times")
+    p.add_argument("--return-any-time", action="store_true")
+    p.add_argument("--reference-price", type=float)
     a = ap.parse_args()
 
     def ev():
@@ -214,18 +223,27 @@ def main():  # noqa: PLR0912, PLR0915  (CLI subcommand dispatcher)
         ]
         out(call("flight.search", legs=legs, carry_on=not a.no_carry_on))
     elif a.cmd == "flight-watch":
-        if a.action == "add":
+        if a.action in ("add", "exact-add"):
             if len(a.args) != FLIGHT_WATCH_ARGC:
                 ap.error("flight-watch add FROM TO YYYY-MM-DD")
             out(
                 call(
-                    "flight-watch.add",
+                    "flight-watch.exact-add"
+                    if a.action == "exact-add"
+                    else "flight-watch.add",
                     **{
                         "from": a.args[0],
                         "to": a.args[1],
                         "depart": a.args[2],
                         "return": a.ret,
                         "max_price": a.max_price,
+                        "airline": a.airline,
+                        "nonstop": a.nonstop,
+                        "outbound_times": a.outbound_times,
+                        "outbound_flights": a.outbound_flights,
+                        "return_times": a.return_times,
+                        "return_any_time": a.return_any_time,
+                        "reference_price": a.reference_price,
                     },
                 )
             )

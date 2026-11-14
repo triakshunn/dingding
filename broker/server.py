@@ -275,6 +275,7 @@ class Broker:
                 "track": lambda a: self.tr.report(a.get("what")),
                 "track.dismiss": lambda a: self.tr.dismiss(a.get("ids") or []),
                 "flight-watch.add": self._watch_add,
+                "flight-watch.exact-add": self._watch_exact_add,
                 "flight-watch.list": lambda a: self.tr.watches(),
                 "flight-watch.rm": self._watch_rm,
                 "flight.search": self._flight_search,
@@ -1525,6 +1526,12 @@ class Broker:
     def _watch_add(self, a):
         try:
             return self.tr.watch_add(a)
+        except ValueError as e:
+            raise RefusedError(str(e)) from e
+
+    def _watch_exact_add(self, a):
+        try:
+            return self.tr.watch_exact_add(a)
         except ValueError as e:
             raise RefusedError(str(e)) from e
 

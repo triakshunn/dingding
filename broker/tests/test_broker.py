@@ -1315,6 +1315,287 @@ class BrokerTests(unittest.TestCase):
                 server.trackers.telegram,
             )
 
+    def test_23b_filtered_round_trip_watch(self):
+        key = TMP / "serpapi_key"
+        key.write_text("FAKE_SERPAPI_KEY")
+        tr = BROKER.tr
+        now = [dt.datetime(2026, 11, 14, 9, tzinfo=server.trackers.TZ)]
+        sent, queries = [], []
+        return_price = [460, 430]
+
+        def flight(code, frm, to, date):
+            return {
+                "airline": "Delta" if code == "DL" else "United",
+                "flight_number": f"{code} 123",
+                "departure_airport": {"id": frm, "time": f"{date} 08:00"},
+                "arrival_airport": {"id": to, "time": f"{date} 10:00"},
+            }
+
+        def fake_serpapi(q):
+            queries.append(q)
+            if "departure_token" not in q:
+                return {
+                    "best_flights": [
+                        {
+                            "price": 350,
+                            "flights": [
+                                flight("UA", "DTW", "SFO", "2026-12-22")
+                            ],
+                            "departure_token": "wrong",
+                        },
+                        {
+                            "price": 370,
+                            "flights": [
+                                flight("DL", "DTW", "LAX", "2026-12-22"),
+                                flight("DL", "LAX", "SFO", "2026-12-22"),
+                            ],
+                            "departure_token": "connecting",
+                        },
+                        {
+                            "price": 400,
+                            "flights": [
+                                flight("DL", "DTW", "SFO", "2026-12-22")
+                            ],
+                            "departure_token": "correct",
+                        },
+                    ],
+                    "price_insights": {"lowest_price": 350},
+                }
+            self.assertEqual(q["departure_token"], "correct")
+            return {
+                "best_flights": [
+                    {
+                        "price": 300,
+                        "flights": [flight("UA", "SFO", "DTW", "2027-01-05")],
+                    },
+                    {
+                        "price": 320,
+                        "flights": [
+                            flight("DL", "SFO", "LAX", "2027-01-05"),
+                            flight("DL", "LAX", "DTW", "2027-01-05"),
+                        ],
+                    },
+                    {
+                        "price": return_price.pop(0),
+                        "flights": [flight("DL", "SFO", "DTW", "2027-01-05")],
+                    },
+                ],
+                "price_insights": {"lowest_price": 300},
+            }
+
+        try:
+            tr.now, tr.notify = lambda: now[0], sent.append
+            with (
+                patch.dict(os.environ, {"SERPAPI_KEY_FILE": str(key)}),
+                patch.object(server.trackers, "_serpapi", fake_serpapi),
+            ):
+                watch = run(
+                    "ia",
+                    "flight-watch",
+                    "add",
+                    "DTW",
+                    "SFO",
+                    "2026-12-22",
+                    "--return",
+                    "2027-01-05",
+                    "--max-price",
+                    "439",
+                    "--airline",
+                    "DL",
+                    "--nonstop",
+                )
+                self.assertEqual(
+                    (watch["watch"]["airline"], watch["watch"]["nonstop"]),
+                    ("DL", True),
+                )
+                tr.check_prices()
+                self.assertEqual(sent, [])
+                self.assertEqual(tr.watches()[0]["latest"]["lowest"], 460)
+                now[0] += dt.timedelta(hours=25)
+                tr.check_prices()
+                self.assertEqual(len(sent), 1)
+                self.assertIn("$430", sent[0])
+                self.assertIn("nonstop both ways", sent[0])
+                self.assertEqual(tr.watches()[0]["latest"]["lowest"], 430)
+                self.assertEqual(len(queries), 4)
+                self.assertTrue(
+                    all(
+                        q["include_airlines"] == "DL" and q["stops"] == "1"
+                        for q in queries
+                    )
+                )
+                run("ia", "flight-watch", "rm", watch["added"])
+        finally:
+            tr.now, tr.notify = (
+                server.trackers.Trackers(BROKER).now,
+                server.trackers.telegram,
+            )
+
+    def test_23c_exact_itinerary_watch(self):
+        key = TMP / "serpapi_key"
+        key.write_text("FAKE_SERPAPI_KEY")
+        tr = BROKER.tr
+        now = [dt.datetime(2026, 11, 14, 9, tzinfo=server.trackers.TZ)]
+        sent, queries = [], []
+        fares = {"early": [439, 425, 455], "late": [439, 449, 460]}
+
+        def flight(code, number, frm, to, date, at):  # noqa: PLR0917
+            return {
+                "airline": "Delta" if code == "DL" else "United",
+                "flight_number": f"{code} {number}",
+                "departure_airport": {"id": frm, "time": f"{date} {at}"},
+                "arrival_airport": {"id": to, "time": f"{date} 23:00"},
+            }
+
+        def fake_serpapi(q):
+            queries.append(q)
+            self.assertEqual((q["include_airlines"], q["stops"]), ("DL", "1"))
+            if "departure_token" not in q:
+                return {
+                    "best_flights": [
+                        {
+                            "price": 350,
+                            "flights": [
+                                flight(
+                                    "UA", 1, "DTW", "SFO", "2026-12-22", "08:40"
+                                )
+                            ],
+                            "departure_token": "wrong",
+                        },
+                        {
+                            "price": 200,
+                            "flights": [
+                                flight(
+                                    "DL",
+                                    99,
+                                    "DTW",
+                                    "SFO",
+                                    "2026-12-22",
+                                    "15:00",
+                                )
+                            ],
+                            "departure_token": "other",
+                        },
+                        {
+                            "price": 439,
+                            "flights": [
+                                flight(
+                                    "DL",
+                                    10,
+                                    "DTW",
+                                    "SFO",
+                                    "2026-12-22",
+                                    "08:40",
+                                )
+                            ],
+                            "departure_token": "early",
+                        },
+                        {
+                            "price": 439,
+                            "flights": [
+                                flight(
+                                    "DL",
+                                    20,
+                                    "DTW",
+                                    "SFO",
+                                    "2026-12-22",
+                                    "20:24",
+                                )
+                            ],
+                            "departure_token": "late",
+                        },
+                    ]
+                }
+            token = q["departure_token"]
+            return {
+                "best_flights": [
+                    {
+                        "price": 300,
+                        "flights": [
+                            flight("UA", 2, "SFO", "DTW", "2027-01-05", "12:00")
+                        ],
+                    },
+                    {
+                        "price": fares[token].pop(0),
+                        "flights": [
+                            flight(
+                                "DL", 30, "SFO", "DTW", "2027-01-05", "17:00"
+                            )
+                        ],
+                    },
+                ],
+                "price_insights": {"lowest_price": 300},
+            }
+
+        try:
+            tr.now, tr.notify = lambda: now[0], sent.append
+            with (
+                patch.dict(os.environ, {"SERPAPI_KEY_FILE": str(key)}),
+                patch.object(server.trackers, "_serpapi", fake_serpapi),
+            ):
+                base = (
+                    "ia",
+                    "flight-watch",
+                    "exact-add",
+                    "DTW",
+                    "SFO",
+                    "2026-12-22",
+                    "--return",
+                    "2027-01-05",
+                    "--airline",
+                    "DL",
+                    "--nonstop",
+                    "--reference-price",
+                    "439",
+                )
+                self.assertIn(
+                    "choose --return-any-time",
+                    run(*base, "--outbound-time", "08:40", ok=False),
+                )
+                self.assertEqual(tr.watches(), [])
+                self.assertIn(
+                    "08:40 DL10",
+                    run(
+                        *base,
+                        "--return-any-time",
+                        "--outbound-time",
+                        "07:00",
+                        ok=False,
+                    ),
+                )
+                self.assertEqual(tr.watches(), [])
+                added = run(
+                    *base,
+                    "--return-any-time",
+                    "--outbound-time",
+                    "08:40",
+                    "--outbound-time",
+                    "20:24",
+                )
+                watch = added["watch"]
+                self.assertEqual(watch["outbound_flights"], ["DL10", "DL20"])
+                self.assertEqual(watch["reference_price"], 439)
+                self.assertEqual(watch["latest"]["lowest"], 439)
+                self.assertEqual(sent, [])
+                now[0] += dt.timedelta(hours=25)
+                tr.check_prices()
+                self.assertEqual(len(sent), 1)
+                self.assertIn("$425, was $439", sent[0])
+                self.assertIn("DL10 at 08:40", sent[0])
+                self.assertEqual(tr.watches()[0]["latest"]["lowest"], 425)
+                now[0] += dt.timedelta(hours=25)
+                tr.check_prices()
+                self.assertEqual(len(sent), 2)
+                self.assertIn("📈 Flight price changed", sent[1])
+                self.assertIn("$455, was $425", sent[1])
+                self.assertEqual(len(queries), 10)
+                run("ia", "flight-watch", "rm", added["added"])
+        finally:
+            tr.now, tr.notify = (
+                server.trackers.Trackers(BROKER).now,
+                server.trackers.telegram,
+            )
+
     def test_24_flight_search_multi_leg(self):
         tz = server.trackers.TZ
         key = TMP / "serpapi_key"
