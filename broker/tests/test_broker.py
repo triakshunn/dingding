@@ -1293,11 +1293,12 @@ class BrokerTests(unittest.TestCase):
                 patch.object(tr, "fetch_price", fetch),
             ):
                 tr.check_prices()
-                tr.check_prices()  # second call same day: no new search
+                now[0] += dt.timedelta(hours=7)
+                tr.check_prices()  # not due yet
                 self.assertEqual((len(prices), sent), (2, []))
-                now[0] += dt.timedelta(hours=25)
+                now[0] += dt.timedelta(hours=1)
                 tr.check_prices()  # 1150: <5 % drop, no alert
-                now[0] += dt.timedelta(hours=25)
+                now[0] += dt.timedelta(hours=8)
                 tr.check_prices()  # 1080: alert
             self.assertEqual(len(sent), 1)
             self.assertIn("$1,080, was $1,150", sent[0])

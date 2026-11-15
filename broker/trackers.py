@@ -39,7 +39,7 @@ UPCOMING_DAYS = 7
 SERPAPI_MONTHLY_CAP = int(
     os.environ.get("SERPAPI_MONTHLY_CAP", "240")
 )  # free plan: 250 searches/month
-WATCH_EVERY_HOURS = 24
+WATCH_EVERY_HOURS = 8
 WATCH_RETURN_CANDIDATES = 2  # cap return searches per filtered round trip
 MAX_EXACT_OUTBOUND = 4
 MAX_SEARCHES_PER_REQUEST = 12  # one flight-search request (legs x dates)
@@ -931,7 +931,7 @@ class Trackers:
         return {
             "added": w["id"],
             "watch": _public_watch(w),
-            "note": "Checked about once a day." + note,
+            "note": "Checked about every 8 hours while search quota remains." + note,
         }
 
     def watch_exact_add(self, a):  # noqa: PLR0912, PLR0915  (validation and fare resolution)
@@ -1212,7 +1212,7 @@ class Trackers:
             "added": w["id"],
             "watch": _public_watch(w),
             "note": "Exact outbound flight(s) verified; return fare checked. "
-            "Checks run about once a day; price changes go to Telegram. "
+            "Checks run about every 8 hours while search quota remains; price changes go to Telegram. "
             "This does not enable Google Flights email tracking.",
         }
 
@@ -1338,7 +1338,7 @@ class Trackers:
         }
 
     def check_prices(self):  # noqa: PLR0912, PLR0915  (watch state and notifications)
-        """Checks each due watch (about daily) and alerts on price drops.
+        """Checks each due watch (about every eight hours) and alerts on price changes.
 
         Stays within SERPAPI_MONTHLY_CAP searches per month. Alerts when the
         price beats the previous low by DROP_ALERT or first goes under the
